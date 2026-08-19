@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard</title>
+    <link href="/css/output.css" rel="stylesheet">
+
+</head>
+
+<body class="bg-gray-50 font-sans text-gray-800">
+
+    <div class="flex h-screen">
+        <%- include('sidebar', { username: username }) %>
+
+        <!-- Main -->
+        <div class="flex-1 flex flex-col">
+            <!-- Navbar -->
+<header class="flex justify-between items-center px-6 py-3 bg-white shadow">
+  <h1 class="text-3xl font-bold text-[#065b8a]">Dashboard</h1>
+  <div class="flex items-center space-x-2">
+    <img class="h-8 w-8 rounded-full ring-2 ring-[#065b8a]" src="https://via.placeholder.com/40" alt="">
+    <span class="text-base font-medium text-[#065b8a]"><%= username %></span>
+  </div>
+</header>
+
+
+
+            <!-- Dashboard -->
+            <main class="p-6 space-y-6 overflow-y-auto">
+                <h2 class="text-3xl font-semibold text-[#065b8a]">Welcome back, <%= username %>!</h2>
+                <p class="text-gray-600">Here’s a quick overview of your business this month.</p>
+
+                <!-- Stats -->
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-6">
+                    <div class="p-4 bg-white rounded-lg shadow border-t-4 border-[#065b8a]">
+                        <p class="text-sm text-gray-500">Monthly Sales</p>
+                        <p class="monthly sales text-xl font-bold text-[#065b8a]">--</p>
+                    </div>
+                    <div class="p-4 bg-white rounded-lg shadow border-t-4 border-[#1b634a]">
+                        <p class="text-sm text-gray-500">Total Customers</p>
+                        <p class="monthly customers text-xl font-bold text-[#1b634a]">--</p>
+                    </div>
+                    <div class="p-4 bg-white rounded-lg shadow border-t-4 border-[#065b8a]">
+                        <p class="text-sm text-gray-500">Products Sold</p>
+                        <p class="monthly products text-xl font-bold text-[#065b8a]">--</p>
+                    </div>
+                    <div class="p-4 bg-white rounded-lg shadow border-t-4 border-gray-400">
+                        <p class="text-sm text-gray-500">Pending Orders</p>
+                        <p class="text-xl font-bold text-gray-600">N/A</p>
+                    </div>
+                </div>
+
+                <!-- Customer Sales Table -->
+                <div class="p-6 bg-white rounded-lg shadow">
+                    <h3 class="font-medium text-lg mb-4 text-[#065b8a]">Customer Sales (This Month)</h3>
+                    <table class="w-full text-sm border border-gray-200 rounded overflow-hidden">
+                        <thead class="bg-[#065b8a] text-white">
+                            <tr>
+                                <th class="px-4 py-2 border border-gray-200">Customer</th>
+                                <th class="px-4 py-2 border border-gray-200">Total Sales</th>
+                            </tr>
+                        </thead>
+                        <tbody class="customer-sales"></tbody>
+                    </table>
+                </div>
+
+                <!-- Product Sales Table -->
+                <div class="p-6 bg-white rounded-lg shadow">
+                    <h3 class="font-medium text-lg mb-4 text-[#1b634a]">Product Sales (This Month)</h3>
+                    <table class="w-full text-sm border border-gray-200 rounded overflow-hidden">
+                        <thead class="bg-[#1b634a] text-white">
+                            <tr>
+                                <th class="px-4 py-2 border border-gray-200">Product Code</th>
+                                <th class="px-4 py-2 border border-gray-200">Quantity Sold</th>
+                                <th class="px-4 py-2 border border-gray-200">Revenue</th>
+                            </tr>
+                        </thead>
+                        <tbody class="product-sales"></tbody>
+                    </table>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <!-- Script -->
+    <script>
+    try {
+        fetch('/dashboard/load')
+            .then(response => response.json())
+            .then(data => {
+                if (!data.success) throw new Error("Dashboard API failed");
+
+                const dashboard = data.dashboard;
+
+                // 1️⃣ Monthly Sales
+                document.querySelector('.monthly.sales').textContent =
+                    `$${dashboard.overallSales.toFixed(2)}`;
+
+                // 2️⃣ Total Customers
+                document.querySelector('.monthly.customers').textContent =
+                    dashboard.totalCustomers;
+
+                // 3️⃣ Total Products Sold
+                document.querySelector('.monthly.products').textContent =
+                    dashboard.totalProducts;
+
+                // 4️⃣ Fill Customer Sales Table
+                const customerTable = document.querySelector('.customer-sales');
+                customerTable.innerHTML = "";
+                dashboard.customerSales.forEach(c => {
+                    customerTable.innerHTML += `
+                        <tr class="hover:bg-gray-50">
+                            <td class="px-4 py-2 border border-gray-200">${c._id}</td>
+                            <td class="px-4 py-2 border border-gray-200">$${c.total.toFixed(2)}</td>
+                        </tr>`;
+                });
+
+                // 5️⃣ Fill Product Sales Table
+                const productTable = document.querySelector('.product-sales');
+                productTable.innerHTML = "";
+                dashboard.productSales.forEach(p => {
+                    productTable.innerHTML += `
+                        <tr class="hover:bg-gray-50">
+                            <td class="px-4 py-2 border border-gray-200">${p._id}</td>
+                            <td class="px-4 py-2 border border-gray-200">${p.totalQuantity}</td>
+                            <td class="px-4 py-2 border border-gray-200">$${p.totalRevenue.toFixed(2)}</td>
+                        </tr>`;
+                });
+
+            })
+            .catch(err => console.error('Error fetching dashboard:', err));
+    } catch (e) {
+        console.error('Error loading dashboard:', e);
+    }
+    </script>
+
+</body>
+</html>

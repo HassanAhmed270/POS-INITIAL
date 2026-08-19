@@ -1,0 +1,4 @@
+{
+    "appService.defaultWebAppToDeploy": "/subscriptions/f45c6f5e-94db-4473-9b4f-26220b9aed4a/resourceGroups/appsvc_linux_canadaeast/providers/Microsoft.Web/sites/BillingSys",
+    "appService.deploySubpath": "."
+}

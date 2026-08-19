@@ -1,0 +1,33 @@
+============================================================
+Billing System Transaction Log
+============================================================
+
+Date       : 2025-09-04
+Time       : 10:15:42 AM
+Order ID   : #9501
+Customer   : Ali Raza
+Cashier    : Hassan
+
+Products:
+------------------------------------------------------------
+Product ID : #1447
+Name       : Bluetooth Speaker
+Quantity   : 2
+Unit Price : $350
+Discount   : $50
+Subtotal   : $650
+
+Product ID : #1448
+Name       : Gaming Mouse
+Quantity   : 1
+Unit Price : $500
+Discount   : $0
+Subtotal   : $500
+
+------------------------------------------------------------
+Total Amount : $1150
+Payment      : Cash
+
+Status : Successfully Saved
+
+============================================================

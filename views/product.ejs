@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Product Management</title> 
+   <link href="/css/output.css" rel="stylesheet">
+</head>
+
+<body class="bg-gray-50 font-sans text-gray-800 ">
+  <div class="flex h-screen">
+
+    <%- include('sidebar') %>
+
+    <!-- ✅ Main billing content -->
+    <main class="flex-1 p-6 overflow-y-auto">
+      <div class="head flex justify-between items-center mb-6">
+        <div class="space-x-3 text-blue-600 text-3xl font-bold">
+          Product Management
+        </div>
+        <div>
+          <input type="text" placeholder="Search products..." class="search border rounded px-3 py-2">
+        </div>
+      </div>
+
+      <!-- Products Table -->
+      <div class="bg-white border rounded-lg w-full">
+        <div class="flex h-[620px]">
+          <div class="w-2/3 h-[600px] overflow-y-auto px-4">
+            <table class="w-full text-sm ">
+              <thead>
+                <tr class="border-b bg-gray-100 space-y-1">
+                  <th class="py-3 px-2 text-left">#</th>
+                  <th class="py-3 px-2 text-left">Product ID</th>
+                  <th class="py-3 px-2 text-left">Name</th>
+                  <th class="py-3 px-2 text-left">Category</th>
+                  <th class="py-3 px-2 text-left">Price</th>
+                  <th class="py-3 px-2 text-left">Stock</th>
+                  <th class="py-3 px-2 text-left">Actions</th>
+                </tr>
+              </thead>
+             <tbody id="productTableBody">
+  <% products.forEach(p=> { %>
+    <tr class="rw1 border-b hover:bg-gray-50">
+      <td class="py-2 px-3"><input type="checkbox" class="rowcheckbox"></td>
+      <td class="py-2 px-3"><%= p.productID %></td>
+      <td class="py-2 px-3"><%= p.productName %></td>
+      <td class="py-2 px-3"><%= p.category %></td>
+      <td class="py-2 px-3">$<%= p.unitPrice[0].price %></td>
+      <td class="py-2 px-3"><%= p.quantity %></td>
+      <td class="py-2 px-3 flex gap-2">
+        <button onclick="editProduct('<%= p.productID %>')" class="text-blue-600 hover:text-blue-800">✏️</button>
+        <button onclick="deleteProduct('<%= p.productID %>')" class="text-red-600 hover:text-red-800">🗑️</button>
+      </td>
+    </tr>
+  <% }) %>
+</tbody>
+
+            </table>
+          </div>
+
+          <!-- Add product form -->
+          <div class="newproductform w-1/3  p-8 border-l-4 border-gray-300">
+            <h2 class="text-2xl flex justify-center text-green-600 font-bold mb-4">Add New Product</h2>
+            <form action="/product" method="post" class="space-y-4 w-full">
+              <!-- Product Id -->
+              <div>
+                <label for="productId" class="block mb-1 font-medium">Product ID</label>
+                <input type="text" id="productId" name="productId" placeholder="Enter product ID"
+                  class="border rounded px-3 py-2 bg-gray-100 w-full">
+              </div>
+              <!-- Product Name -->
+              <div>
+                <label for="productName" class="block mb-1 font-medium">Product Name</label>
+                <input type="text" id="productName" name="productName" placeholder="Enter product name"
+                  class="border rounded px-3 py-2 bg-gray-100 w-full">
+              </div>
+
+              <!-- Category -->
+              <div>
+                <label for="category" class="block mb-1 font-medium">Category</label>
+                <input type="text" id="category" name="category" placeholder="Enter category"
+                  class="border rounded px-3 py-2 w-full">
+              </div>
+
+              <!-- Price -->
+              <div>
+                <label for="price" class="block mb-1 font-medium">Price</label>
+                <input type="number" id="price" name="price" placeholder="Enter price"
+                  class="border rounded px-3 py-2 w-full">
+              </div>
+
+              <!-- Stock -->
+              <div>
+                <label for="stock" class="block mb-1 font-medium">Stock</label>
+                <input type="number" id="stock" name="stock" placeholder="Enter stock"
+                  class="border rounded px-3 py-2 w-full">
+              </div>
+              <!-- Supplier -->
+              <div>
+                <label for="supplier" class="block mb-1 font-medium">supplier</label>
+                <input type="text" id="supplier" name="supplier" placeholder="Enter supplier name"
+                  class="border rounded px-3 py-2 w-full">
+              </div>
+
+              <!-- Button -->
+              <button type="submit" class="px-4 py-2 bg-green-600 text-white rounded">
+                Add Product
+              </button>
+            </form>
+          </div>
+
+          <!-- Update product form -->
+          <div class="updproductform w-1/3 hidden p-8 border-l-4 border-gray-300">
+            <h2 class="text-2xl flex justify-center text-green-600 font-bold mb-4">Update Product</h2>
+            <form action="/product" method="post" class="space-y-4 w-full">
+              <!-- Product Id -->
+              <div>
+                <label for="productId" class="block mb-1 font-medium">Product ID</label>
+                <input type="text" id="productId" name="productId" placeholder="Enter product ID"
+                  class="border rounded px-3 py-2 bg-gray-100 w-full">
+              </div>
+              <!-- Product Name -->
+              <div>
+                <label for="productName" class="block mb-1 font-medium">Product Name</label>
+                <input type="text" id="productName" name="productName" placeholder="Enter product name"
+                  class="border rounded px-3 py-2 bg-gray-100 w-full">
+              </div>
+
+              <!-- Category -->
+              <div>
+                <label for="category" class="block mb-1 font-medium">Category</label>
+                <input type="text" id="category" name="category" placeholder="Enter category"
+                  class="border rounded px-3 py-2 w-full">
+              </div>
+
+              <!-- Price -->
+              <div>
+                <label for="price" class="block mb-1 font-medium">Price</label>
+                <input type="number" id="price" name="price" placeholder="Enter price"
+                  class="border rounded px-3 py-2 w-full">
+              </div>
+
+              <!-- Stock -->
+              <div>
+                <label for="stock" class="block mb-1 font-medium">Stock</label>
+                <input type="number" id="stock" name="stock" placeholder="Enter stock"
+                  class="border rounded px-3 py-2 w-full">
+              </div>
+              <!-- Supplier -->
+              <div>
+                <label for="supplier" class="block mb-1 font-medium">supplier</label>
+                <input type="text" id="supplier" name="supplier" placeholder="Enter supplier name"
+                  class="border rounded px-3 py-2 w-full">
+              </div>
+              <!-- already -->
+              <div>
+                <input type="text" id="already" name="already" placeholder="Enter already value"
+                  class="border rounded px-3 py-2 w-full">
+              </div>
+
+              <!-- Button -->
+              <button type="submit" class="px-4 py-2 bg-green-600 text-white rounded">
+                Update Product
+              </button>
+            </form>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex gap-4 mt-4 py-4 px-8">
+        <button onclick="openForm1()" class="px-4 py-2 bg-blue-600 text-white rounded">Add Product +</button>
+        <button onclick="openForm2()" class="btnUpdate px-4 py-2 bg-green-600 text-white rounded">Update Selected</button>
+        <button onclick="openDelete()" class="btnDelete px-4 py-2 bg-red-600 text-white rounded">Delete Product</button>
+        <button onclick="openUndo()" class="hidden btnUndo px-4 py-2 bg-red-600 text-white rounded">Undo Deleted</button>
+      </div>
+    </main>
+  </div>
+
+    <script>
+
+      let undo = [];
+      function showUndoBtn() {
+        let btnUndo = document.querySelector('.btnUndo');
+        let btnD = document.querySelector('.btnDelete');
+        btnD.classList.add('hidden');
+        btnUndo.classList.remove('hidden');
+
+        setTimeout(() => {
+          btnD.classList.remove('hidden');
+          btnUndo.classList.add('hidden');
+        }, 5000);
+      }
+
+      function openForm1() {
+        document.querySelector('.newproductform').classList.remove('hidden');
+        document.querySelector('.updproductform').classList.add('hidden');
+      }
+      function openForm2() {
+        document.querySelector('.updproductform').classList.remove('hidden');
+        document.querySelector('.newproductform').classList.add('hidden');
+      }
+      function openUndo() {
+        if (undo.length === 0) {
+          alert("No actions to undo");
+          return;
+        }
+        let lastAction = undo.pop();
+        fetch('/product/undo', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(lastAction)
+        })
+          .then(res => {
+            if (res.status === 201) {
+              alert("Undo successful! Product restored.");
+              location.reload();
+            } else {
+              alert("Failed to undo action");
+            }
+          });
+      }
+      let btnUpdate = document.querySelector('.btnUpdate');
+      let btnD = document.querySelector('.btnDelete');
+      btnD.addEventListener('click', () => {
+        let rows = document.querySelectorAll('.rw1');
+        rows.forEach(element => {
+          let checkbox = element.querySelector('.rowcheckbox');
+          if (checkbox.checked) {
+            let cells = element.querySelectorAll('td');
+            let productId = cells[1].innerText;
+            deleteProduct(productId);
+          }else{
+            checkbox.checked = false; // ✅ baaki sab unchecked ho jayenge
+          }
+        });
+      });
+      function deleteProduct(productId) {
+        // saari rows le lo
+        let rows = document.querySelectorAll('.rw1');
+
+        rows.forEach(row => {
+          let cells = row.querySelectorAll("td");
+          let idCell = cells[1].innerText;
+          let checkbox = row.querySelector("input[type='checkbox']"); // ✅ yahan define karo
+
+          if (idCell === productId) {
+            checkbox.checked = true; // ✅ checkbox tick kar do
+            let productName = cells[2].innerText;
+            let category = cells[3].innerText;
+            let price = cells[4].innerText.replace('$', '');
+            let stock = cells[5].innerText;
+
+            if (confirm("Are you sure? You want to delete this item?")) {
+              undo.push({
+                productId,
+                productName,
+                category,
+                price: Number(price),
+                stock: Number(stock),
+              });
+
+              showUndoBtn();
+              fetch(`/product/${encodeURIComponent(productId)}`, { method: 'DELETE' })
+                .then(res => {
+                  if (res.status === 200) {
+                    alert("Product deleted successfully!");
+                    row.remove(); // ✅ directly table row delete kar do
+                    showUndoBtn(); // ✅ ab Undo button properly dikhega
+                  } else {
+                    alert("Failed to delete product");
+                  }
+                });
+            } else {
+              // ❌ agar cancel dabaya
+              console.log("Delete cancelled");
+            }
+
+          } else {
+            checkbox.checked = false; // ✅ baaki sab unchecked ho jayenge
+          }
+        });
+      }
+      function editProduct(productId) {
+        // saari rows le lo
+        let rows = document.querySelectorAll('.rw1');
+
+        rows.forEach(row => {
+          let cells = row.querySelectorAll("td");
+          let idCell = cells[1].innerText; // Product ID hamesha column 2 me hai
+          let checkbox = row.querySelector("input[type='checkbox']"); // ✅ yahan define karo
+
+          if (idCell === productId) {
+            checkbox.checked = true; // ✅ checkbox tick kar do
+
+            // Row se data nikal lo
+            let productName = cells[2].innerText;
+            let category = cells[3].innerText;
+            let price = cells[4].innerText.replace('$', '');
+            let stock = cells[5].innerText;
+            let supplier = "";
+
+            // Form dikhado
+            document.querySelector('.updproductform').classList.remove('hidden');
+            document.querySelector('.newproductform').classList.add('hidden');
+
+            // Form ke andar values bhar do
+            let updateform = document.querySelector('.updproductform');
+            updateform.querySelector('#productId').value = productId;
+            updateform.querySelector('#productName').value = productName;
+            updateform.querySelector('#category').value = category;
+            updateform.querySelector('#price').value = price;
+            updateform.querySelector('#stock').value = 0;
+            updateform.querySelector('#supplier').value = supplier;
+            updateform.querySelector('#already').value = stock;
+          } else {
+            checkbox.checked = false; // ✅ baaki sab unchecked ho jayenge
+          }
+        });
+      }
+
+    let searchInput = document.querySelector('.search');
+    searchInput.addEventListener('input', () => {
+        let filter = searchInput.value.toLowerCase();
+        let rows = document.querySelectorAll('#productTableBody tr');
+        rows.forEach(row => {
+          let cells = row.querySelectorAll("td");
+          let name = cells[2].innerText.toLowerCase(); // Assuming product name is in the 3rd column
+          if (name.startsWith(filter)) {
+            row.style.display = '';
+          } else {
+            row.style.display = 'none';
+          }
+        });
+      });
+
+
+
+      btnUpdate.addEventListener('click', () => {
+        let rows = document.querySelectorAll('.rw1');
+        rows.forEach(element => {
+          let checkbox = element.querySelector('.rowcheckbox');
+          if (checkbox.checked) {
+            let cells = element.querySelectorAll('td');
+            let productId = cells[1].innerText;
+            let productName = cells[2].innerText;
+            let category = cells[3].innerText;
+            let price = cells[4].innerText.replace('$', '');
+            let stock = cells[5].innerText;
+            let supplier = "";
+
+            document.querySelector('.updproductform').classList.remove('hidden');
+            document.querySelector('.newproductform').classList.add('hidden');
+
+            let updateform = document.querySelector('.updproductform');
+            updateform.querySelector('#productId').value = productId;
+            updateform.querySelector('#productName').value = productName;
+            updateform.querySelector('#category').value = category;
+            updateform.querySelector('#price').value = price;
+            updateform.querySelector('#stock').value = 0;
+            updateform.querySelector('#supplier').value = supplier;
+            updateform.querySelector('#already').value = stock;
+          }
+          else{
+            document.querySelector('.updproductform').classList.add('hidden');
+            document.querySelector('.newproductform').classList.remove('hidden');
+          }
+        });
+      });
+
+      let selectedRows = document.querySelectorAll('.rowcheckbox:checked');
+      selectedRows.forEach(row => {
+        let cells = row.closest('tr').querySelectorAll('td');
+        let productId = cells[1].innerText;
+        let productName = cells[2].innerText;
+        let category = cells[3].innerText;
+        let price = cells[4].innerText.replace('$', '');
+        let stock = cells[5].innerText;
+        console.log({ productId, productName, category, price, stock });
+      });
+      function openDelete() {
+
+      }
+
+
+    </script>
+</body>
+
+</html>

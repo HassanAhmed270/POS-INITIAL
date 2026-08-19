@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Login</title>
+  <link href="/css/output.css" rel="stylesheet">
+</head>
+
+<body class="h-screen w-screen flex items-center justify-center bg-gradient-to-br from-[#065b8a] via-[#0a6ea6] to-[#e6f2f9]">
+
+  <!-- Background Split -->
+  <div class="absolute inset-0 grid grid-rows-2">
+    <!-- Top Left -->
+    <div class="bg-[#065b8a] flex  justify-center px-10">
+      <h1 class="text-5xl mt-20 font-extrabold text-white">Billing Management</h1>
+    </div>
+    <!-- Bottom Right -->
+    <div class="bg-[#f4f9fc]"></div>
+  </div>
+
+  <!-- Login Card -->
+  <div class="relative bg-white shadow-2xl rounded-2xl w-96 p-8 z-10">
+    <div class="text-center mb-6">
+      <h2 class="text-3xl font-extrabold text-[#065b8a]">Login</h2>
+      <p class="text-gray-500 text-sm">Access your account</p>
+    </div>
+
+    <form action="/dashboard" method="get">
+      <div class="mb-4">
+        <label class="block text-gray-600 mb-2">Username</label>
+        <input type="text" name="username"
+          class="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-[#065b8a]"
+          placeholder="Enter username" required>
+      </div>
+
+      <div class="mb-6">
+        <label class="block text-gray-600 mb-2">Password</label>
+        <input type="password" name="password"
+          class="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-[#065b8a]"
+          placeholder="Enter password" required>
+      </div>
+
+      <button type="submit"
+        class="w-full bg-[#065b8a] hover:bg-[#05486b] text-white font-semibold py-2 px-4 rounded-lg shadow-md transition transform hover:scale-[1.02]">
+        🚀 Login
+      </button>
+    </form>
+  </div>
+
+</body>
+</html>

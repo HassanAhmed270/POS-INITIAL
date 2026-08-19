@@ -1,0 +1,25 @@
+{
+  _id: ObjectId("68b92d445a01b03f3a7a880a"),
+  orderID: "#9501",
+  customerName: "Ali Raza",
+  cashier: "Hassan",
+  products: [
+    {
+      productID: "#1447",
+      productName: "Bluetooth Speaker",
+      quantity: 2,
+      amount: 700,
+      discount: 50
+    },
+    {
+      productID: "#1448",
+      productName: "Gaming Mouse",
+      quantity: 1,
+      amount: 500,
+      discount: 0
+    }
+  ],
+  totalAmount: 1150,
+  paymentMethod: "Cash",
+  orderDate: ISODate("2025-09-04T10:15:42Z")
+}
