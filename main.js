@@ -10,7 +10,7 @@ const Order = require('./models/Order');
 const Customer = require('./models/Customers');
 const PendingBill = require('./models/PendingBill');
 const Supplier = require('./models/Supplier');
-const Refund = require('./models/Refund');
+const Refund = require('./models/Refunds');
 
 const logger = require('./lib/logger');
 const authRoutes = require('./routes/auth');
@@ -20,6 +20,9 @@ const { AppError } = require('./lib/errors');
 const { roundMoney } = require('./lib/money');
 const { getLatestSellingPrice, getLatestBuyingPrice } = require('./lib/pricing');
 const { escapeRegex, parsePagination, sortAndPaginate } = require('./lib/query');
+const { getDashboardSummary } = require('./lib/reports');
+const exportRoutes = require('./routes/export');
+const syncRoutes = require('./routes/sync');
 const {
   isValidEmail,
   isValidPhone,
@@ -82,6 +85,24 @@ function parseThreshold(value) {
 // scripts/createUser.js (there is no public signup route).
 app.use('/auth', authRoutes);
 
+// Stage 10 — CSV export module. Toggleable via ENABLE_EXPORTS; set to
+// "false" in .env to disable/remove the feature without touching
+// anything else here. See routes/export.js and lib/reports.js.
+if (process.env.ENABLE_EXPORTS !== 'false') {
+  app.use('/api/export', exportRoutes);
+} else {
+  logger.info('Export module disabled (ENABLE_EXPORTS=false)');
+}
+
+// Stage 11 — Offline Sync module. Optional, off by default (unlike
+// exports, which default on) — set ENABLE_OFFLINE_SYNC=true in .env to
+// turn it on. See routes/sync.js and lib/offlineSync.js.
+if (process.env.ENABLE_OFFLINE_SYNC === 'true') {
+  app.use('/api/sync', syncRoutes);
+} else {
+  logger.info('Offline sync module disabled (set ENABLE_OFFLINE_SYNC=true to enable)');
+}
+
 // ── Legacy EJS pages (untouched; kept as a working reference
 //    while the React frontend migration is in progress) ──────
 app.get('/logout', (req, res) => {
@@ -111,92 +132,12 @@ app.get('/customer', asyncHandler(async (req, res) => {
 }));
 
 // ── JSON read API for the React frontend (public — see CLAUDE.md) ──
+// Stage 9's aggregation now lives in lib/reports.js (getDashboardSummary)
+// so Stage 10's export module can reuse the exact same queries — this
+// route is just a thin JSON wrapper around it.
 app.get('/dashboard/load', asyncHandler(async (req, res) => {
   const { range = 'month' } = req.query;
-  const startDate = new Date();
-  if (range === 'week') {
-    startDate.setDate(startDate.getDate() - startDate.getDay()); // back to Sunday
-    startDate.setHours(0, 0, 0, 0);
-  } else if (range === 'year') {
-    startDate.setMonth(0, 1);
-    startDate.setHours(0, 0, 0, 0);
-  } else {
-    startDate.setDate(1); // default: month
-    startDate.setHours(0, 0, 0, 0);
-  }
-
-  const dashboardData = await Order.aggregate([
-    { $match: { orderDate: { $gte: startDate } } },
-    {
-      $facet: {
-        // Order.totalAmount is kept live-updated by both edits and
-        // refunds (Stage 7 recomputes it from whatever's left on the
-        // order), so summing it here already nets out both — no separate
-        // subtraction needed. See CLAUDE.md Stage 9.
-        overallSales: [{ $group: { _id: null, total: { $sum: '$totalAmount' } } }],
-        totalOrders: [{ $count: 'count' }],
-        refundedOrders: [{ $match: { status: 'refunded' } }, { $count: 'count' }],
-        // Distinct from refunds — an order can have edit-type
-        // editHistory entries (a quantity correction / exchange) without
-        // ever being refunded.
-        exchangedOrders: [{ $match: { editHistory: { $elemMatch: { action: 'edit' } } } }, { $count: 'count' }],
-        customerSales: [
-          { $group: { _id: '$customerName', total: { $sum: '$totalAmount' } } },
-          { $sort: { total: -1 } },
-        ],
-        productSales: [
-          { $unwind: '$products' },
-          {
-            $group: {
-              _id: '$products.productID',
-              totalQuantity: { $sum: '$products.quantity' },
-              totalRevenue: { $sum: '$products.amount' },
-            },
-          },
-          { $sort: { totalQuantity: -1 } },
-        ],
-        totalCustomers: [{ $group: { _id: '$customerName' } }, { $count: 'count' }],
-        totalProducts: [{ $unwind: '$products' }, { $group: { _id: null, total: { $sum: '$products.quantity' } } }],
-      },
-    },
-  ]);
-
-  // Informational only — refundedAmount is NOT subtracted from
-  // overallSales again (that figure is already net, see above). This is
-  // "how much did we hand back in refunds this period", a separate fact.
-  const refundAgg = await Refund.aggregate([
-    { $match: { refundDate: { $gte: startDate } } },
-    { $group: { _id: null, total: { $sum: '$refundAmount' } } },
-  ]);
-
-  // Snapshots, not date-scoped — "outstanding" and "payable" are as-of-now
-  // figures, not tied to the selected reporting window.
-  const creditAgg = await Customer.aggregate([
-    { $unwind: { path: '$orders', preserveNullAndEmptyArrays: true } },
-    { $group: { _id: null, total: { $sum: { $ifNull: ['$orders.balanceDue', 0] } } } },
-  ]);
-  const payableAgg = await Supplier.aggregate([
-    { $unwind: { path: '$purchases', preserveNullAndEmptyArrays: true } },
-    { $group: { _id: null, total: { $sum: { $ifNull: ['$purchases.balanceDue', 0] } } } },
-  ]);
-
-  const facets = dashboardData[0];
-  const result = {
-    range,
-    startDate,
-    overallSales: roundMoney(facets.overallSales[0]?.total || 0),
-    totalOrders: facets.totalOrders[0]?.count || 0,
-    refundedOrders: facets.refundedOrders[0]?.count || 0,
-    refundedAmount: roundMoney(refundAgg[0]?.total || 0),
-    exchangedOrders: facets.exchangedOrders[0]?.count || 0,
-    totalCustomerCreditOutstanding: roundMoney(creditAgg[0]?.total || 0),
-    totalSupplierPayable: roundMoney(payableAgg[0]?.total || 0),
-    customerSales: facets.customerSales || [],
-    productSales: facets.productSales || [],
-    totalCustomers: facets.totalCustomers[0]?.count || 0,
-    totalProducts: facets.totalProducts[0]?.total || 0,
-  };
-
+  const result = await getDashboardSummary(range);
   res.json({ success: true, dashboard: result });
 }));
 

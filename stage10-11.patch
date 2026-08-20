@@ -1,0 +1,1923 @@
+diff --git a/.env.example b/.env.example
+index a40e782..213ec88 100644
+--- a/.env.example
++++ b/.env.example
+@@ -14,3 +14,12 @@ LOG_LEVEL=info
+ 
+ DRAFT_IDLE_TIMEOUT_MS=900000
+ DRAFT_SWEEP_INTERVAL_MS=60000
++
++# CSV export module (Stage 10). Set to "false" to disable/remove the
++# feature entirely — see routes/export.js and lib/reports.js.
++ENABLE_EXPORTS=true
++
++# Offline sync module (Stage 11) — optional, off by default. Set to
++# "true" to enable POST /api/sync/commit and the admin conflict queue.
++# See routes/sync.js and lib/offlineSync.js.
++ENABLE_OFFLINE_SYNC=false
+diff --git a/frontend/src/App.jsx b/frontend/src/App.jsx
+index 39c9e79..68ea688 100644
+--- a/frontend/src/App.jsx
++++ b/frontend/src/App.jsx
+@@ -1,6 +1,8 @@
+ import { BrowserRouter, Routes, Route } from 'react-router-dom';
++import { useEffect } from 'react';
+ import { AuthProvider } from './lib/AuthContext';
+ import ProtectedRoute from './components/ProtectedRoute';
++import { startOfflineSyncWatcher } from './lib/offlineSync';
+ import Login from './pages/Login';
+ import Dashboard from './pages/Dashboard';
+ import Billing from './pages/Billing';
+@@ -8,8 +10,18 @@ import Products from './pages/Products';
+ import Customers from './pages/Customers';
+ import Suppliers from './pages/Suppliers';
+ import Orders from './pages/Orders';
++import Reports from './pages/Reports';
+ 
+ export default function App() {
++  // Stage 11 — starts the background flush loop for any offline sales
++  // queued in IndexedDB. No-op entirely when VITE_ENABLE_OFFLINE_SYNC
++  // isn't "true" (see lib/offlineSync.js) — safe to leave mounted
++  // whether or not the module is enabled.
++  useEffect(() => {
++    const stop = startOfflineSyncWatcher();
++    return stop;
++  }, []);
++
+   return (
+     <AuthProvider>
+       <BrowserRouter>
+@@ -63,6 +75,14 @@ export default function App() {
+               </ProtectedRoute>
+             }
+           />
++          <Route
++            path="/reports"
++            element={
++              <ProtectedRoute>
++                <Reports />
++              </ProtectedRoute>
++            }
++          />
+         </Routes>
+       </BrowserRouter>
+     </AuthProvider>
+diff --git a/frontend/src/components/Sidebar.jsx b/frontend/src/components/Sidebar.jsx
+index 69f3850..1977e44 100644
+--- a/frontend/src/components/Sidebar.jsx
++++ b/frontend/src/components/Sidebar.jsx
+@@ -8,7 +8,7 @@ const links = [
+   { to: '/customers', label: 'Customers' },
+   { to: '/suppliers', label: 'Suppliers' },
+   { to: '/orders', label: 'Orders' },
+-  { to: '/reports', label: 'Reports', disabled: true },
++  { to: '/reports', label: 'Reports' },
+   { to: '/workers', label: 'Workers', disabled: true },
+   { to: '/webpage', label: 'Webpage', disabled: true },
+ ];
+diff --git a/frontend/src/lib/api.js b/frontend/src/lib/api.js
+index 01f67d5..9ea5027 100644
+--- a/frontend/src/lib/api.js
++++ b/frontend/src/lib/api.js
+@@ -69,9 +69,51 @@ getCustomers: (params = {}) => request(`/api/customers?${new URLSearchParams(par
+   saveDraft: (payload) => request('/billing/draft', { method: 'POST', body: JSON.stringify(payload) }),
+   discardDraft: () => request('/billing/draft', { method: 'DELETE' }),
+ 
++  // Offline sync (Stage 11) — optional module, see lib/offlineQueue.js /
++  // lib/offlineSync.js for the client-side queue this talks to.
++  syncOfflineSale: (payload) => request('/api/sync/commit', { method: 'POST', body: JSON.stringify(payload) }),
++  getSyncConflicts: () => request('/api/sync/conflicts'),
++  resolveSyncConflict: (id, action, reason) =>
++    request(`/api/sync/conflicts/${encodeURIComponent(id)}/resolve`, {
++      method: 'POST',
++      body: JSON.stringify({ action, reason }),
++    }),
++
+   // Dashboard
+  getDashboard: (range = 'month') => request(`/dashboard/load?range=${encodeURIComponent(range)}`),
+ 
++  // Exports (Stage 10) — these return CSV, not JSON, so they bypass the
++  // shared `request()` helper (which assumes JSON/text-parsed bodies) and
++  // are triggered as a real browser download instead.
++  downloadExport: async (type, range) => {
++    const params = range ? `?range=${encodeURIComponent(range)}` : '';
++    const token = tokenStore.get();
++    const res = await fetch(`${BASE}/api/export/${type}${params}`, {
++      headers: token ? { Authorization: `Bearer ${token}` } : {},
++    });
++    if (res.status === 401) {
++      tokenStore.clear();
++      window.dispatchEvent(new CustomEvent('auth:unauthorized'));
++    }
++    if (!res.ok) {
++      const contentType = res.headers.get('content-type') || '';
++      const body = contentType.includes('application/json') ? await res.json() : await res.text();
++      throw new Error(body?.message || 'Export failed.');
++    }
++    const blob = await res.blob();
++    const disposition = res.headers.get('content-disposition') || '';
++    const match = disposition.match(/filename="([^"]+)"/);
++    const filename = match ? match[1] : `${type}.csv`;
++    const url = URL.createObjectURL(blob);
++    const a = document.createElement('a');
++    a.href = url;
++    a.download = filename;
++    document.body.appendChild(a);
++    a.click();
++    a.remove();
++    URL.revokeObjectURL(url);
++  },
++
+   // Suppliers (Stage 5)
+ getSuppliers: (params = {}) => request(`/api/suppliers?${new URLSearchParams(params)}`),
+   saveSupplier: (payload) => request('/api/supplier', { method: 'POST', body: JSON.stringify(payload) }),
+diff --git a/frontend/src/lib/offlineQueue.js b/frontend/src/lib/offlineQueue.js
+new file mode 100644
+index 0000000..8dc4565
+--- /dev/null
++++ b/frontend/src/lib/offlineQueue.js
+@@ -0,0 +1,103 @@
++// Stage 11 — the client-side half of the offline sync module. A thin,
++// dependency-free wrapper around the browser's own IndexedDB (no library
++// pulled in, same "modular means no extra baggage" spirit as Stage 10's
++// CSV writer) — this is what makes a queued sale durable across a tab
++// close, browser crash, or device restart, which is the whole point of
++// "offline" meaning "no data loss" rather than just "works while
++// disconnected".
++//
++// Each queue entry mirrors what POST /api/sync/commit expects (see
++// routes/sync.js) plus local-only bookkeeping (`status`, `queuedAt`,
++// `lastError`). Nothing in here talks to the network — see
++// offlineSync.js for the connectivity watcher and flush loop that reads
++// from this queue.
++
++const DB_NAME = 'pos-offline-queue';
++const DB_VERSION = 1;
++const STORE = 'sales';
++
++function openDB() {
++  return new Promise((resolve, reject) => {
++    const req = indexedDB.open(DB_NAME, DB_VERSION);
++    req.onupgradeneeded = () => {
++      const db = req.result;
++      if (!db.objectStoreNames.contains(STORE)) {
++        const store = db.createObjectStore(STORE, { keyPath: 'idempotencyKey' });
++        store.createIndex('status', 'status', { unique: false });
++      }
++    };
++    req.onsuccess = () => resolve(req.result);
++    req.onerror = () => reject(req.error);
++  });
++}
++
++async function withStore(mode, fn) {
++  const db = await openDB();
++  return new Promise((resolve, reject) => {
++    const tx = db.transaction(STORE, mode);
++    const store = tx.objectStore(STORE);
++    let result;
++    Promise.resolve(fn(store))
++      .then((r) => {
++        result = r;
++      })
++      .catch(reject);
++    tx.oncomplete = () => resolve(result);
++    tx.onerror = () => reject(tx.error);
++  });
++}
++
++function requestToPromise(req) {
++  return new Promise((resolve, reject) => {
++    req.onsuccess = () => resolve(req.result);
++    req.onerror = () => reject(req.error);
++  });
++}
++
++// Queue one offline sale. `sale` should already have every field
++// POST /api/sync/commit needs (idempotencyKey, customerName, items,
++// paidInput, paymentMethod, clientBillID, createdOfflineAt) — this just
++// adds local bookkeeping and persists it.
++export async function enqueueSale(sale) {
++  const record = {
++    ...sale,
++    status: 'pending', // pending | synced | conflict
++    queuedAt: new Date().toISOString(),
++    lastError: null,
++    resultingOrderID: null,
++  };
++  await withStore('readwrite', (store) => requestToPromise(store.add(record)));
++  return record;
++}
++
++export async function listQueue() {
++  return withStore('readonly', (store) => requestToPromise(store.getAll()));
++}
++
++export async function updateSale(idempotencyKey, patch) {
++  return withStore('readwrite', async (store) => {
++    const existing = await requestToPromise(store.get(idempotencyKey));
++    if (!existing) return null;
++    const updated = { ...existing, ...patch };
++    await requestToPromise(store.put(updated));
++    return updated;
++  });
++}
++
++// Only ever called on sales already marked 'synced' — a queue entry is
++// evidence of an offline sale and stays around (as history) even after
++// a successful sync, until explicitly cleared. Never deletes 'pending' or
++// 'conflict' entries, so a sale can't silently disappear before it's
++// actually accounted for server-side.
++export async function clearSynced() {
++  return withStore('readwrite', async (store) => {
++    const all = await requestToPromise(store.getAll());
++    await Promise.all(
++      all.filter((s) => s.status === 'synced').map((s) => requestToPromise(store.delete(s.idempotencyKey)))
++    );
++  });
++}
++
++export function isOfflineSyncEnabled() {
++  return import.meta.env.VITE_ENABLE_OFFLINE_SYNC === 'true';
++}
+diff --git a/frontend/src/lib/offlineSync.js b/frontend/src/lib/offlineSync.js
+new file mode 100644
+index 0000000..ebb501e
+--- /dev/null
++++ b/frontend/src/lib/offlineSync.js
+@@ -0,0 +1,78 @@
++// Stage 11 — watches connectivity and drains offlineQueue.js whenever the
++// server is reachable. Mounted once, app-wide (see App.jsx), so a sale
++// queued on the Billing page still syncs even if the cashier has since
++// navigated elsewhere — the point of a background flush, not a
++// page-local one.
++import { api } from './api';
++import { listQueue, updateSale, isOfflineSyncEnabled } from './offlineQueue';
++
++const FLUSH_INTERVAL_MS = 15000;
++
++// A failed fetch (offline, DNS, server down) throws a TypeError from the
++// browser's fetch implementation with no HTTP status attached — that's
++// how we tell "couldn't reach the server, try again later" apart from
++// "reached the server, it said no" (400/401/409), which resolves the
++// queue entry one way or the other instead of retrying forever.
++function isNetworkError(err) {
++  return err instanceof TypeError || err?.message === 'Failed to fetch';
++}
++export { isNetworkError };
++
++async function flushOne(sale) {
++  try {
++    const result = await api.syncOfflineSale(sale);
++    // A 200 here only ever means the server actually synced it (or it
++    // was already synced by an earlier attempt) — see routes/sync.js.
++    if (result.status === 'synced') {
++      await updateSale(sale.idempotencyKey, { status: 'synced', resultingOrderID: result.orderID, lastError: null });
++    } else {
++      await updateSale(sale.idempotencyKey, { status: 'conflict', lastError: result.message || 'Sync conflict.' });
++    }
++  } catch (err) {
++    // request() (lib/api.js) throws on any non-2xx response, so a 409
++    // conflict/already-flagged reply from the server lands here, not in
++    // the try block above.
++    if (isNetworkError(err)) {
++      // Still offline (or the server's unreachable) — leave it pending,
++      // the next tick or the next 'online' event will retry.
++      return;
++    }
++    // A genuine server-side rejection reached us (bad request shape,
++    // auth issue, stock/price conflict, etc.) — record it as a conflict
++    // rather than retrying an attempt that won't succeed unattended.
++    await updateSale(sale.idempotencyKey, { status: 'conflict', lastError: err.message || 'Sync failed.' });
++  }
++}
++
++export async function flushQueue() {
++  if (!isOfflineSyncEnabled()) return;
++  if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
++  const queue = await listQueue();
++  const pending = queue.filter((s) => s.status === 'pending');
++  // Sequential, not Promise.all — sales replay in the order they were
++  // made offline, and it keeps this gentle on the server instead of
++  // firing a burst of concurrent commits after a long offline stretch.
++  for (const sale of pending) {
++    // eslint-disable-next-line no-await-in-loop
++    await flushOne(sale);
++  }
++}
++
++let started = false;
++
++// Call once, near the app root. Safe to call multiple times — only the
++// first call actually starts the interval/listeners.
++export function startOfflineSyncWatcher() {
++  if (started || !isOfflineSyncEnabled()) return;
++  started = true;
++
++  flushQueue();
++  const interval = setInterval(flushQueue, FLUSH_INTERVAL_MS);
++  window.addEventListener('online', flushQueue);
++
++  return () => {
++    clearInterval(interval);
++    window.removeEventListener('online', flushQueue);
++    started = false;
++  };
++}
+diff --git a/frontend/src/pages/Billing.jsx b/frontend/src/pages/Billing.jsx
+index dd98696..7ec1d84 100644
+--- a/frontend/src/pages/Billing.jsx
++++ b/frontend/src/pages/Billing.jsx
+@@ -4,6 +4,8 @@ import { useAuth } from '../lib/AuthContext';
+ import { api } from '../lib/api';
+ import { roundMoney, formatMoney } from '../lib/money';
+ import { printReceipt } from '../lib/print';
++import { isOfflineSyncEnabled, enqueueSale } from '../lib/offlineQueue';
++import { isNetworkError, flushQueue } from '../lib/offlineSync';
+ 
+ const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+ const emptyCustomerForm = { customerName: '', mobileNo: '', emergencyMobile: '', email: '', address: '' };
+@@ -33,6 +35,31 @@ export default function Billing() {
+   const [paid, setPaid] = useState('');
+   const [paymentMethod, setPaymentMethod] = useState('cash');
+ 
++  // Stage 11 — offline sync. `isOnline` mirrors the browser's own signal;
++  // it's the fast/local half of "are we connected" (an actual failed
++  // request is still the real source of truth — see handleAddToBill/
++  // handleGenerateBill below, which fall back on a genuine network error
++  // even if isOnline was stale). Only ever consulted when the module is
++  // enabled (VITE_ENABLE_OFFLINE_SYNC=true) — otherwise Billing behaves
++  // exactly as it did before Stage 11.
++  const offlineSyncEnabled = isOfflineSyncEnabled();
++  const [isOnline, setIsOnline] = useState(typeof navigator === 'undefined' ? true : navigator.onLine);
++
++  useEffect(() => {
++    if (!offlineSyncEnabled) return;
++    const goOnline = () => {
++      setIsOnline(true);
++      flushQueue(); // don't wait for the next 15s tick — try immediately on reconnect
++    };
++    const goOffline = () => setIsOnline(false);
++    window.addEventListener('online', goOnline);
++    window.addEventListener('offline', goOffline);
++    return () => {
++      window.removeEventListener('online', goOnline);
++      window.removeEventListener('offline', goOffline);
++    };
++  }, [offlineSyncEnabled]);
++
+ 
+   const loadProducts = () =>
+     api
+@@ -231,6 +258,40 @@ export default function Billing() {
+     try {
+       reserved = await api.reserveStock(selectedProductId, quantity);
+     } catch (err) {
++      // Stage 11: a genuine network failure (not "stock unavailable" —
++      // that's a normal rejected response, not a thrown network error)
++      // while the module is enabled means we can't reserve, but the sale
++      // can still be captured provisionally and re-validated at sync
++      // time (see lib/offlineSync.js, routes/sync.js). Anything else
++      // (insufficient stock, invalid product) behaves exactly as before.
++      if (offlineSyncEnabled && isNetworkError(err)) {
++        const alreadyInCart = Object.values(billingItems)
++          .filter((it) => it.productCode === selectedProductId.replace('#', ''))
++          .reduce((sum, it) => sum + it.quantity, 0);
++        const softAvailable = (product.available ?? product.quantity - (product.reserved || 0)) - alreadyInCart;
++        if (softAvailable < quantity) {
++          alert(`Offline — based on the last known stock, only ${Math.max(softAvailable, 0)} unit(s) of this item look available. Add fewer, or confirm with the customer.`);
++          return;
++        }
++        const nextItemNo = itemNo + 1;
++        setItemNo(nextItemNo);
++        setBillingItems((prev) => ({
++          ...prev,
++          [nextItemNo]: {
++            productCode: selectedProductId.replace('#', ''),
++            itemName: itemForm.productName,
++            unitPrice,
++            quantity,
++            discount: roundMoney(discount),
++            discountType: discount > 0 ? itemForm.discountType : 'none',
++            offline: true, // never reserved server-side — re-validated at sync time
++          },
++        }));
++        setItemForm({ productId: '', productName: '', unitPrice: '', quantity: '', discount: '', discountType: 'none' });
++        setShowDiscount(false);
++        setSelectedProductId(null);
++        return;
++      }
+       alert(err.message || 'Could not reserve stock for this item.');
+       await loadProducts(); // someone else's sale likely just changed availability — resync
+       return;
+@@ -275,15 +336,35 @@ export default function Billing() {
+       // Ask the server for a free order id, same retry loop as the original app.
+       // (kept small since this is a low-volume single-shop system)
+       for (let i = 0; i < 20; i++) {
+-        const data = await api.getUniqueOrderId(candidate);
+-        if (!data.exists) break;
+-        const num = (parseInt(candidate.slice(1)) + 1) % 10000;
+-        candidate = '#' + num.toString().padStart(4, '0');
++        try {
++          const data = await api.getUniqueOrderId(candidate);
++          if (!data.exists) break;
++          const num = (parseInt(candidate.slice(1)) + 1) % 10000;
++          candidate = '#' + num.toString().padStart(4, '0');
++        } catch (err) {
++          // Stage 11: can't ask the server offline — use this candidate
++          // as a local placeholder. It's informational only; the real ID
++          // gets allocated server-side at sync time (see
++          // lib/offlineSync.js's allocateOrderId), so a collision here
++          // just means the synced order ends up with a different number.
++          if (offlineSyncEnabled && isNetworkError(err)) break;
++          throw err;
++        }
+       }
+       setBillId(candidate);
++      if (offlineSyncEnabled && !isOnline) {
++        // No server draft to persist to while offline — the whole cart
++        // stays client-side until Generate Bill queues it (see
++        // handleGenerateBill).
++        setView('preview');
++        return;
++      }
+       // Persist the reserved ID immediately rather than waiting for the
+       // debounce — if the person clicks Generate Bill in the next second,
+-      // the server needs to already know this bill's ID.
++      // the server needs to already know this bill's ID. (saveDraftNow
++      // already swallows its own errors — see its definition above — so
++      // a network hiccup here just means the debounced autosave picks it
++      // up later instead.)
+       await saveDraftNow(undefined, undefined, candidate);
+       setView('preview');
+     } catch (err) {
+@@ -306,6 +387,11 @@ export default function Billing() {
+     });
+ 
+     try {
++      // Offline-added items were never reserved server-side (Stage 11) —
++      // nothing to release.
++      if (item.offline) {
++        return;
++      }
+       const released = await api.releaseStock(`#${item.productCode}`, item.quantity);
+       setProducts((prev) =>
+         prev.map((p) =>
+@@ -342,6 +428,36 @@ export default function Billing() {
+     await loadProducts();
+   };
+ 
++  // Extracted from the original inline receipt-building so both the
++  // normal (online) success path and the Stage 11 offline-queued path
++  // can share it — `offline` just adds a visible marker so the printed
++  // slip is honest about not being a confirmed sale yet.
++  const printReceiptFor = (total, paidNum, offline = false) => {
++    const rows = Object.entries(billingItems)
++      .map(([key, item]) => {
++        const subtotal = item.unitPrice * item.quantity;
++        const net = roundMoney(subtotal - subtotal * (item.discount / 100));
++        return `<tr><td>${key}</td><td>${item.productCode}</td><td>${item.itemName}</td><td>${formatMoney(item.unitPrice)}</td><td>${item.quantity}</td><td>${formatMoney(subtotal)}</td><td>${item.discount}%</td><td>${formatMoney(net)}</td></tr>`;
++      })
++      .join('');
++
++    const html = `
++      <h2 style="text-align:center;font-weight:bold;font-size:20px;border-bottom:1px solid #ddd;padding-bottom:8px;">Receipt</h2>
++      <div style="margin:8px 0;font-weight:600;">Bill ID: ${billId}</div>
++      ${offline ? '<div style="margin:8px 0;font-weight:700;color:#b45309;">OFFLINE — PENDING SYNC (not yet confirmed)</div>' : ''}
++
++      <table>
++        <thead><tr><th>S.no</th><th>Code</th><th>Product</th><th>Price</th><th>Qty</th><th>Total</th><th>Save</th><th>Net</th></tr></thead>
++        <tbody>${rows}</tbody>
++      </table>
++      <div class="totals"><span>Grand Total</span><span>${formatMoney(total)}</span></div>
++      <div class="totals"><span>Paid</span><span>${formatMoney(paidNum)}</span></div>
++      <div class="totals"><span>${paidNum >= total ? 'Change' : 'Balance Due (Credit)'}</span><span>${formatMoney(Math.abs(paidNum - total))}</span></div>
++      <div style="margin-top:8px;">Customer: ${customer}</div>
++    `;
++    printReceipt(html);
++  };
++
+   const handleGenerateBill = async () => {
+     const total = grandTotal;
+     const paidNum = parseFloat(paid) || 0;
+@@ -383,34 +499,46 @@ export default function Billing() {
+         return;
+       }
+ 
+-      const rows = Object.entries(billingItems)
+-        .map(([key, item]) => {
+-          const subtotal = item.unitPrice * item.quantity;
+-          const net = roundMoney(subtotal - subtotal * (item.discount / 100));
+-          return `<tr><td>${key}</td><td>${item.productCode}</td><td>${item.itemName}</td><td>${formatMoney(item.unitPrice)}</td><td>${item.quantity}</td><td>${formatMoney(subtotal)}</td><td>${item.discount}%</td><td>${formatMoney(net)}</td></tr>`;
+-        })
+-        .join('');
+-
+-      const html = `
+-        <h2 style="text-align:center;font-weight:bold;font-size:20px;border-bottom:1px solid #ddd;padding-bottom:8px;">Receipt</h2>
+-        <div style="margin:8px 0;font-weight:600;">Bill ID: ${billId}</div>
+-
+-        <table>
+-          <thead><tr><th>S.no</th><th>Code</th><th>Product</th><th>Price</th><th>Qty</th><th>Total</th><th>Save</th><th>Net</th></tr></thead>
+-          <tbody>${rows}</tbody>
+-        </table>
+-        <div class="totals"><span>Grand Total</span><span>${formatMoney(total)}</span></div>
+-        <div class="totals"><span>Paid</span><span>${formatMoney(paidNum)}</span></div>
+-        <div class="totals"><span>${paidNum >= total ? 'Change' : 'Balance Due (Credit)'}</span><span>${formatMoney(Math.abs(paidNum - total))}</span></div>
+-        <div style="margin-top:8px;">Customer: ${customer}</div>
+-      `;
+-      printReceipt(html);
+-
++      printReceiptFor(total, paidNum);
+       alert('Order saved successfully.');
+       resetBill();
+       setCustomer('unknown');
+       await loadProducts();
+     } catch (err) {
++      // Stage 11: a genuine network failure — not a rejected order — is
++      // the one case where we don't just show an error. The whole cart
++      // gets queued as one offline sale (durable in IndexedDB) instead of
++      // lost, and re-validated against live stock/prices when the queue
++      // flushes (see lib/offlineSync.js, routes/sync.js). Any other
++      // failure (validation, stock conflict while actually online, etc.)
++      // behaves exactly as before Stage 11.
++      if (offlineSyncEnabled && isNetworkError(err)) {
++        try {
++          await enqueueSale({
++            idempotencyKey: crypto.randomUUID(),
++            clientBillID: billId,
++            customerName: customer,
++            items: Object.values(billingItems).map((it) => ({
++              productID: `#${it.productCode}`,
++              productName: it.itemName,
++              unitPrice: it.unitPrice,
++              quantity: it.quantity,
++              discount: it.discount,
++              discountType: it.discountType || 'manual',
++            })),
++            paidInput: paidNum,
++            paymentMethod,
++            createdOfflineAt: new Date().toISOString(),
++          });
++          printReceiptFor(total, paidNum, true);
++          alert('No connection — this bill has been saved on this device and will sync automatically once you\'re back online.');
++          resetBill();
++          setCustomer('unknown');
++        } catch (queueErr) {
++          alert('Could not save this bill, even offline: ' + queueErr.message);
++        }
++        return;
++      }
+       alert('Error saving order: ' + err.message);
+     }
+   };
+@@ -475,6 +603,13 @@ export default function Billing() {
+ 
+           {error && <p className="text-red-600 text-sm">{error}</p>}
+ 
++          {offlineSyncEnabled && !isOnline && (
++            <div className="bg-amber-50 border border-amber-300 text-amber-800 text-sm rounded-lg px-4 py-2">
++              You're offline. Bills can still be created — they'll be saved on this device and synced automatically
++              once you're back online. Stock and prices will be re-checked at that point.
++            </div>
++          )}
++
+           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 h-[600px]">
+             <div className="md:col-span-2 bg-white rounded-lg shadow p-4 overflow-y-auto">
+               <input
+diff --git a/frontend/src/pages/Reports.jsx b/frontend/src/pages/Reports.jsx
+new file mode 100644
+index 0000000..03d49e1
+--- /dev/null
++++ b/frontend/src/pages/Reports.jsx
+@@ -0,0 +1,304 @@
++import { useEffect, useState } from 'react';
++import Sidebar from '../components/Sidebar';
++import Topbar from '../components/Topbar';
++import { api } from '../lib/api';
++import { useAuth } from '../lib/AuthContext';
++import { isOfflineSyncEnabled, listQueue, clearSynced } from '../lib/offlineQueue';
++import { flushQueue } from '../lib/offlineSync';
++
++const RANGE_LABEL = { week: 'This week', month: 'This month', year: 'This year' };
++
++// Each entry is one downloadable CSV. `type` maps straight to
++// /api/export/:type on the backend (routes/export.js) — see progress.md
++// Stage 10 for what's in each file.
++const EXPORTS = [
++  { type: 'summary', label: 'Summary', description: 'One-row snapshot of the headline dashboard numbers.', ranged: true },
++  { type: 'sales', label: 'Sales', description: 'Every order placed in the selected range.', ranged: true },
++  { type: 'refunds', label: 'Refunds', description: 'Every refund processed in the selected range.', ranged: true },
++  { type: 'credit', label: 'Customer Credit', description: 'Every order with an outstanding balance, as of now.', ranged: false },
++  { type: 'payables', label: 'Supplier Payables', description: 'Every purchase with an outstanding balance, as of now.', ranged: false },
++];
++
++export default function Reports() {
++  const { isAdmin } = useAuth();
++  const [range, setRange] = useState('month');
++  const [pending, setPending] = useState('');
++  const [error, setError] = useState('');
++  const offlineSyncEnabled = isOfflineSyncEnabled();
++
++  const handleExport = async (type) => {
++    setError('');
++    setPending(type);
++    try {
++      await api.downloadExport(type, EXPORTS.find((e) => e.type === type).ranged ? range : undefined);
++    } catch (err) {
++      setError(err.message || 'Export failed.');
++    } finally {
++      setPending('');
++    }
++  };
++
++  return (
++    <div className="flex h-screen">
++      <Sidebar />
++      <div className="flex-1 flex flex-col">
++        <Topbar title="Reports" />
++        <main className="p-6 space-y-6 overflow-y-auto">
++          <div className="flex items-center justify-between">
++            <div>
++              <h2 className="text-3xl font-semibold text-brand">Export data</h2>
++              <p className="text-gray-600">Download CSV reports for sales, refunds, credit, and payables.</p>
++            </div>
++            <div className="flex gap-1 bg-gray-100 rounded-lg p-1">
++              {['week', 'month', 'year'].map((r) => (
++                <button
++                  key={r}
++                  onClick={() => setRange(r)}
++                  className={`px-3 py-1.5 text-sm rounded-md capitalize ${
++                    range === r ? 'bg-brand text-white' : 'text-gray-600 hover:bg-gray-200'
++                  }`}
++                >
++                  {r}
++                </button>
++              ))}
++            </div>
++          </div>
++
++          {error && <p className="text-red-600 text-sm">{error}</p>}
++
++          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
++            {EXPORTS.map((e) => (
++              <div key={e.type} className="p-5 bg-white rounded-lg shadow flex flex-col justify-between">
++                <div>
++                  <h3 className="font-medium text-lg text-brand">{e.label}</h3>
++                  <p className="text-sm text-gray-500 mt-1">{e.description}</p>
++                  {e.ranged && (
++                    <p className="text-xs text-gray-400 mt-2">{RANGE_LABEL[range]}</p>
++                  )}
++                  {!e.ranged && <p className="text-xs text-gray-400 mt-2">Snapshot, as of now</p>}
++                </div>
++                <button
++                  onClick={() => handleExport(e.type)}
++                  disabled={pending === e.type}
++                  className="mt-4 self-start px-4 py-2 bg-brand text-white rounded-md text-sm hover:bg-brand-dark disabled:opacity-60"
++                >
++                  {pending === e.type ? 'Downloading…' : 'Download CSV'}
++                </button>
++              </div>
++            ))}
++          </div>
++
++          {/* Stage 11 — only rendered when the offline sync module is on
++              (VITE_ENABLE_OFFLINE_SYNC=true). This is the "export screen
++              distinguishes synced vs. pending records" exit criterion:
++              OfflineSalesPanel reads this device's own IndexedDB queue,
++              SyncConflictsPanel (admins only) reads the server's list of
++              sales that couldn't be auto-synced and need a decision. */}
++          {offlineSyncEnabled && <OfflineSalesPanel />}
++          {offlineSyncEnabled && isAdmin && <SyncConflictsPanel />}
++        </main>
++      </div>
++    </div>
++  );
++}
++
++const STATUS_STYLE = {
++  pending: 'bg-amber-100 text-amber-800',
++  synced: 'bg-green-100 text-green-800',
++  conflict: 'bg-red-100 text-red-800',
++};
++
++function saleTotal(sale) {
++  return sale.items.reduce((sum, it) => sum + roundMoney(it.unitPrice * it.quantity * (1 - it.discount / 100)), 0);
++}
++
++function roundMoney(n) {
++  return Math.round((n + Number.EPSILON) * 100) / 100;
++}
++
++// This device's own offline queue (IndexedDB) — what got captured here
++// while offline, and whether it's synced yet. A different cashier's
++// device has its own separate queue; this panel only ever shows this
++// browser's.
++function OfflineSalesPanel() {
++  const [queue, setQueue] = useState([]);
++  const [loading, setLoading] = useState(true);
++  const [syncing, setSyncing] = useState(false);
++
++  const refresh = async () => {
++    const all = await listQueue();
++    all.sort((a, b) => new Date(b.queuedAt) - new Date(a.queuedAt));
++    setQueue(all);
++    setLoading(false);
++  };
++
++  useEffect(() => {
++    refresh();
++    const interval = setInterval(refresh, 5000);
++    return () => clearInterval(interval);
++  }, []);
++
++  const counts = queue.reduce(
++    (acc, s) => ({ ...acc, [s.status]: (acc[s.status] || 0) + 1 }),
++    { pending: 0, synced: 0, conflict: 0 }
++  );
++
++  const handleSyncNow = async () => {
++    setSyncing(true);
++    await flushQueue();
++    await refresh();
++    setSyncing(false);
++  };
++
++  const handleClearSynced = async () => {
++    await clearSynced();
++    await refresh();
++  };
++
++  return (
++    <div className="bg-white rounded-lg shadow p-5 space-y-4">
++      <div className="flex items-center justify-between">
++        <div>
++          <h3 className="font-medium text-lg text-brand">Offline sales on this device</h3>
++          <p className="text-sm text-gray-500">
++            {counts.pending} pending · {counts.synced} synced · {counts.conflict} need review
++          </p>
++        </div>
++        <div className="flex gap-2">
++          <button
++            onClick={handleSyncNow}
++            disabled={syncing || counts.pending === 0}
++            className="px-3 py-1.5 text-sm bg-brand text-white rounded-md hover:bg-brand-dark disabled:opacity-50"
++          >
++            {syncing ? 'Syncing…' : 'Sync now'}
++          </button>
++          <button
++            onClick={handleClearSynced}
++            disabled={counts.synced === 0}
++            className="px-3 py-1.5 text-sm bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200 disabled:opacity-50"
++          >
++            Clear synced
++          </button>
++        </div>
++      </div>
++
++      {loading ? (
++        <p className="text-sm text-gray-400">Loading…</p>
++      ) : queue.length === 0 ? (
++        <p className="text-sm text-gray-400">No offline sales recorded on this device.</p>
++      ) : (
++        <div className="divide-y">
++          {queue.map((sale) => (
++            <div key={sale.idempotencyKey} className="py-2 flex items-center justify-between text-sm">
++              <div>
++                <span className="font-medium">{sale.customerName}</span>
++                <span className="text-gray-400 mx-2">·</span>
++                <span>{sale.items.length} item(s)</span>
++                <span className="text-gray-400 mx-2">·</span>
++                <span>Rs {saleTotal(sale).toFixed(2)}</span>
++                <span className="text-gray-400 mx-2">·</span>
++                <span className="text-gray-400">{new Date(sale.createdOfflineAt).toLocaleString()}</span>
++                {sale.status === 'conflict' && sale.lastError && (
++                  <p className="text-xs text-red-600 mt-0.5">{sale.lastError}</p>
++                )}
++              </div>
++              <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_STYLE[sale.status]}`}>
++                {sale.status}
++                {sale.status === 'synced' && sale.resultingOrderID ? ` (${sale.resultingOrderID})` : ''}
++              </span>
++            </div>
++          ))}
++        </div>
++      )}
++    </div>
++  );
++}
++
++// Server-side conflict queue (admin only) — offline sales that reached
++// the server but couldn't be committed automatically (stock ran out,
++// price changed, customer/product no longer exists) and need a human
++// call: retry (e.g. after restocking) or reject outright.
++function SyncConflictsPanel() {
++  const [conflicts, setConflicts] = useState([]);
++  const [loading, setLoading] = useState(true);
++  const [error, setError] = useState('');
++  const [busyId, setBusyId] = useState('');
++
++  const refresh = async () => {
++    try {
++      const data = await api.getSyncConflicts();
++      setConflicts(data.conflicts || []);
++    } catch (err) {
++      setError(err.message || 'Could not load sync conflicts.');
++    } finally {
++      setLoading(false);
++    }
++  };
++
++  useEffect(() => {
++    refresh();
++  }, []);
++
++  const handleResolve = async (id, action) => {
++    setBusyId(id);
++    try {
++      await api.resolveSyncConflict(id, action);
++      await refresh();
++    } catch (err) {
++      setError(err.message || 'Could not resolve this conflict.');
++    } finally {
++      setBusyId('');
++    }
++  };
++
++  return (
++    <div className="bg-white rounded-lg shadow p-5 space-y-4">
++      <div>
++        <h3 className="font-medium text-lg text-brand">Offline sync conflicts</h3>
++        <p className="text-sm text-gray-500">
++          Offline sales that reached the server but couldn't be auto-committed — usually stock or price changed
++          while the device was offline.
++        </p>
++      </div>
++
++      {error && <p className="text-red-600 text-sm">{error}</p>}
++
++      {loading ? (
++        <p className="text-sm text-gray-400">Loading…</p>
++      ) : conflicts.length === 0 ? (
++        <p className="text-sm text-gray-400">No conflicts waiting for review.</p>
++      ) : (
++        <div className="divide-y">
++          {conflicts.map((c) => (
++            <div key={c._id} className="py-3 flex items-center justify-between text-sm">
++              <div>
++                <span className="font-medium">{c.customerName}</span>
++                <span className="text-gray-400 mx-2">·</span>
++                <span>{c.items.length} item(s)</span>
++                <span className="text-gray-400 mx-2">·</span>
++                <span className="text-gray-400">Cashier: {c.cashier}</span>
++                <p className="text-xs text-red-600 mt-0.5">{c.conflictReason}</p>
++              </div>
++              <div className="flex gap-2">
++                <button
++                  onClick={() => handleResolve(c._id, 'retry')}
++                  disabled={busyId === c._id}
++                  className="px-3 py-1.5 text-xs bg-brand text-white rounded-md hover:bg-brand-dark disabled:opacity-50"
++                >
++                  Retry
++                </button>
++                <button
++                  onClick={() => handleResolve(c._id, 'reject')}
++                  disabled={busyId === c._id}
++                  className="px-3 py-1.5 text-xs bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200 disabled:opacity-50"
++                >
++                  Reject
++                </button>
++              </div>
++            </div>
++          ))}
++        </div>
++      )}
++    </div>
++  );
++}
+diff --git a/lib/csv.js b/lib/csv.js
+new file mode 100644
+index 0000000..8289be7
+--- /dev/null
++++ b/lib/csv.js
+@@ -0,0 +1,29 @@
++// Minimal CSV writer — deliberately dependency-free. Stage 10's exit
++// criteria is "removable without touching core code"; not pulling in an
++// npm package for this means the export module is just files that can be
++// deleted, with nothing added to package.json for the rest of the app to
++// carry around.
++//
++// Output is standard RFC 4180 CSV (comma-separated, CRLF line endings,
++// double-quote escaping) — opens cleanly in Excel, Google Sheets, and
++// Numbers, which is what "CSV/Excel export" means in practice without a
++// binary .xlsx writer.
++
++function escapeCell(value) {
++  if (value === null || value === undefined) return '';
++  const str = String(value);
++  if (/[",\r\n]/.test(str)) {
++    return `"${str.replace(/"/g, '""')}"`;
++  }
++  return str;
++}
++
++// rows: array of plain objects. columns: [{ key, label }] — controls both
++// column order and the header row text, independent of key names.
++function toCSV(rows, columns) {
++  const header = columns.map((c) => escapeCell(c.label)).join(',');
++  const body = rows.map((row) => columns.map((c) => escapeCell(row[c.key])).join(','));
++  return [header, ...body].join('\r\n') + '\r\n';
++}
++
++module.exports = { toCSV };
+diff --git a/lib/offlineSync.js b/lib/offlineSync.js
+new file mode 100644
+index 0000000..2a774b2
+--- /dev/null
++++ b/lib/offlineSync.js
+@@ -0,0 +1,175 @@
++// Stage 11 — the offline mirror of POST /billing/orderDetails's commit
++// transaction (Stage 3/4), deliberately kept as its own self-contained
++// path rather than refactored into main.js's existing route. Two things
++// are structurally different here, which is why it isn't just a call
++// into the same function:
++//
++//   1. There is no server-held PendingBill to source items from. A draft
++//      only exists because the client could reach the server to autosave
++//      it — offline, that never happened, so the items this function
++//      trusts are whatever the client durably queued in IndexedDB.
++//   2. Stock was never reserved for this cart (reservation itself is a
++//      live API call — see POST /billing/reserve). So instead of
++//      consuming an existing reservation, this checks current
++//      availability (quantity - reserved) directly at sync time and
++//      decrements quantity only.
++//
++// Keeping this separate also means the module stays true to its own
++// exit criteria: it can be deleted (this file, models/OfflineSale.js,
++// routes/sync.js, and the one mount line in main.js) without touching
++// the live billing flow at all.
++const mongoose = require('mongoose');
++const Product = require('../models/Product');
++const Order = require('../models/Order');
++const Customer = require('../models/Customers');
++const { AppError } = require('./errors');
++const { roundMoney } = require('./money');
++const { getLatestSellingPrice } = require('./pricing');
++
++// Small-shop-scale ID allocation (same assumption Billing.jsx's own
++// getUniqueOrderId retry loop makes) — try the client's own offline pick
++// first, then fall back to random 4-digit candidates until one's free.
++async function allocateOrderId(session, preferred) {
++  const candidates = [];
++  if (preferred && /^#\d{4}$/.test(preferred)) candidates.push(preferred);
++  for (let i = 0; i < 30; i++) {
++    candidates.push('#' + Math.floor(Math.random() * 10000).toString().padStart(4, '0'));
++  }
++  for (const id of candidates) {
++    // eslint-disable-next-line no-await-in-loop
++    const exists = await Order.exists({ orderID: id }).session(session);
++    if (!exists) return id;
++  }
++  throw new AppError(409, 'Could not allocate a unique order ID — try syncing again.');
++}
++
++// Attempts to turn one queued OfflineSale document into a real Order.
++// Never throws for an *expected* conflict (bad price, insufficient stock,
++// missing customer/product) — those come back as { conflictReason } so
++// the caller can park the sale for admin review instead of retrying
++// forever. Only genuine/unexpected errors (DB down, etc.) propagate.
++async function syncOfflineSale(offlineSale, { cashier }) {
++  const session = await mongoose.startSession();
++  let order = null;
++  let conflictReason = null;
++
++  try {
++    await session.withTransaction(async () => {
++      const customer = await Customer.findOne({ customerName: offlineSale.customerName }).session(session);
++      if (!customer) {
++        throw new AppError(409, `Customer "${offlineSale.customerName}" not found — it may not have existed yet when this sale was made offline.`);
++      }
++
++      // Re-derive every line's price from the DB's current value, same
++      // tolerance rule as the live commit path (Stage 2) — a price that
++      // moved while the device was offline is exactly the kind of thing
++      // this re-validation step exists to catch.
++      const verifiedProducts = [];
++      for (const item of offlineSale.items) {
++        // eslint-disable-next-line no-await-in-loop
++        const product = await Product.findOne({ productID: item.productID }).session(session);
++        if (!product) {
++          throw new AppError(409, `Product ${item.productID} no longer exists.`);
++        }
++
++        const currentPrice = getLatestSellingPrice(product);
++        const expectedAmount = roundMoney(currentPrice * item.quantity * (1 - item.discount / 100));
++        const capturedAmount = roundMoney(item.unitPrice * item.quantity * (1 - item.discount / 100));
++
++        if (Math.abs(expectedAmount - capturedAmount) > 0.01) {
++          throw new AppError(
++            409,
++            `Price for ${item.productID} changed since this sale was made offline (was ${capturedAmount}, now ${expectedAmount}).`
++          );
++        }
++
++        verifiedProducts.push({
++          productID: item.productID,
++          quantity: item.quantity,
++          amount: expectedAmount,
++          discount: roundMoney(item.discount),
++          discountType: item.discountType || 'manual',
++          discountAmount: roundMoney(currentPrice * item.quantity - expectedAmount),
++        });
++      }
++
++      // Availability check against *current* stock, not a reservation
++      // this cart never held. Guarded in the query filter, same atomic
++      // pattern as every other stock mutation in the app (Stage 3).
++      for (const p of verifiedProducts) {
++        // eslint-disable-next-line no-await-in-loop
++        const updated = await Product.findOneAndUpdate(
++          { productID: p.productID, $expr: { $gte: [{ $subtract: ['$quantity', '$reserved'] }, p.quantity] } },
++          { $inc: { quantity: -p.quantity } },
++          { session, new: true }
++        );
++        if (!updated) {
++          throw new AppError(409, `Not enough current stock for ${p.productID} to honor this offline sale.`);
++        }
++      }
++
++      const verifiedTotal = roundMoney(verifiedProducts.reduce((sum, p) => sum + p.amount, 0));
++      const amountPaid = roundMoney(Math.min(Math.max(offlineSale.paidInput || 0, 0), verifiedTotal));
++      const balanceDue = roundMoney(Math.max(0, verifiedTotal - amountPaid));
++      const paymentStatus = amountPaid <= 0 ? 'unpaid' : balanceDue > 0 ? 'partial' : 'paid';
++      const payments =
++        amountPaid > 0
++          ? [{ amount: amountPaid, date: offlineSale.createdOfflineAt, method: offlineSale.paymentMethod || 'cash' }]
++          : [];
++
++      const orderID = await allocateOrderId(session, offlineSale.clientBillID);
++
++      const created = await Order.create(
++        [
++          {
++            orderID,
++            customerName: offlineSale.customerName,
++            totalAmount: verifiedTotal,
++            products: verifiedProducts,
++            cashier,
++            amountPaid,
++            balanceDue,
++            paymentStatus,
++            payments,
++            // The sale happened offline at this timestamp, not "now" —
++            // keeps date-scoped reports (Stage 9) accurate to when the
++            // sale actually occurred rather than when the device
++            // happened to reconnect.
++            orderDate: offlineSale.createdOfflineAt,
++          },
++        ],
++        { session }
++      );
++      order = created[0];
++
++      await Customer.updateOne(
++        { customerName: offlineSale.customerName },
++        {
++          $push: {
++            orders: {
++              orderNo: orderID,
++              orderDate: offlineSale.createdOfflineAt,
++              totalAmount: verifiedTotal,
++              amountPaid,
++              balanceDue,
++            },
++          },
++        },
++        { session }
++      );
++    });
++  } catch (err) {
++    if (err instanceof AppError) {
++      conflictReason = err.message;
++      order = null;
++    } else {
++      throw err; // genuine/unexpected failure — let asyncHandler's error middleware handle it
++    }
++  } finally {
++    await session.endSession();
++  }
++
++  return { order, conflictReason };
++}
++
++module.exports = { syncOfflineSale, allocateOrderId };
+diff --git a/lib/reports.js b/lib/reports.js
+new file mode 100644
+index 0000000..e3cf545
+--- /dev/null
++++ b/lib/reports.js
+@@ -0,0 +1,191 @@
++// Single source of truth for "what does a sales/refund/credit/payable
++// report look like" — built for Stage 9 (dashboard) and reused as-is by
++// Stage 10 (CSV/Excel export) so the two surfaces can never drift apart.
++// Nothing in here is export-specific; routes/export.js just calls these
++// same functions and serializes the result differently.
++const Order = require('../models/Order');
++const Refund = require('../models/Refunds');
++const Customer = require('../models/Customers');
++const Supplier = require('../models/Supplier');
++const { roundMoney } = require('./money');
++
++// Same range resolution /dashboard/load has used since Stage 9: week =
++// back to Sunday, month = start of calendar month (default), year = Jan 1.
++function resolveRangeStart(range) {
++  const startDate = new Date();
++  if (range === 'week') {
++    startDate.setDate(startDate.getDate() - startDate.getDay());
++    startDate.setHours(0, 0, 0, 0);
++  } else if (range === 'year') {
++    startDate.setMonth(0, 1);
++    startDate.setHours(0, 0, 0, 0);
++  } else {
++    startDate.setDate(1);
++    startDate.setHours(0, 0, 0, 0);
++  }
++  return startDate;
++}
++
++// The exact aggregation /dashboard/load ran inline before Stage 10 —
++// moved here unchanged so the dashboard and the export's "summary" sheet
++// are guaranteed to report the same numbers for the same range.
++async function getDashboardSummary(range = 'month') {
++  const startDate = resolveRangeStart(range);
++
++  const dashboardData = await Order.aggregate([
++    { $match: { orderDate: { $gte: startDate } } },
++    {
++      $facet: {
++        overallSales: [{ $group: { _id: null, total: { $sum: '$totalAmount' } } }],
++        totalOrders: [{ $count: 'count' }],
++        refundedOrders: [{ $match: { status: 'refunded' } }, { $count: 'count' }],
++        exchangedOrders: [{ $match: { editHistory: { $elemMatch: { action: 'edit' } } } }, { $count: 'count' }],
++        customerSales: [
++          { $group: { _id: '$customerName', total: { $sum: '$totalAmount' } } },
++          { $sort: { total: -1 } },
++        ],
++        productSales: [
++          { $unwind: '$products' },
++          {
++            $group: {
++              _id: '$products.productID',
++              totalQuantity: { $sum: '$products.quantity' },
++              totalRevenue: { $sum: '$products.amount' },
++            },
++          },
++          { $sort: { totalQuantity: -1 } },
++        ],
++        totalCustomers: [{ $group: { _id: '$customerName' } }, { $count: 'count' }],
++        totalProducts: [{ $unwind: '$products' }, { $group: { _id: null, total: { $sum: '$products.quantity' } } }],
++      },
++    },
++  ]);
++
++  const refundAgg = await Refund.aggregate([
++    { $match: { refundDate: { $gte: startDate } } },
++    { $group: { _id: null, total: { $sum: '$refundAmount' } } },
++  ]);
++
++  const creditAgg = await Customer.aggregate([
++    { $unwind: { path: '$orders', preserveNullAndEmptyArrays: true } },
++    { $group: { _id: null, total: { $sum: { $ifNull: ['$orders.balanceDue', 0] } } } },
++  ]);
++  const payableAgg = await Supplier.aggregate([
++    { $unwind: { path: '$purchases', preserveNullAndEmptyArrays: true } },
++    { $group: { _id: null, total: { $sum: { $ifNull: ['$purchases.balanceDue', 0] } } } },
++  ]);
++
++  const facets = dashboardData[0];
++  return {
++    range,
++    startDate,
++    overallSales: roundMoney(facets.overallSales[0]?.total || 0),
++    totalOrders: facets.totalOrders[0]?.count || 0,
++    refundedOrders: facets.refundedOrders[0]?.count || 0,
++    refundedAmount: roundMoney(refundAgg[0]?.total || 0),
++    exchangedOrders: facets.exchangedOrders[0]?.count || 0,
++    totalCustomerCreditOutstanding: roundMoney(creditAgg[0]?.total || 0),
++    totalSupplierPayable: roundMoney(payableAgg[0]?.total || 0),
++    customerSales: facets.customerSales || [],
++    productSales: facets.productSales || [],
++    totalCustomers: facets.totalCustomers[0]?.count || 0,
++    totalProducts: facets.totalProducts[0]?.total || 0,
++  };
++}
++
++// Row-level detail behind the "sales" export — one row per order in range.
++async function getSalesRows(range = 'month') {
++  const startDate = resolveRangeStart(range);
++  const orders = await Order.find(
++    { orderDate: { $gte: startDate } },
++    'orderID customerName cashier orderDate totalAmount amountPaid balanceDue paymentStatus status'
++  ).sort({ orderDate: 1 });
++
++  return orders.map((o) => ({
++    orderID: o.orderID,
++    customerName: o.customerName,
++    cashier: o.cashier,
++    orderDate: o.orderDate.toISOString(),
++    totalAmount: roundMoney(o.totalAmount),
++    amountPaid: roundMoney(o.amountPaid),
++    balanceDue: roundMoney(o.balanceDue),
++    paymentStatus: o.paymentStatus,
++    status: o.status,
++  }));
++}
++
++// Row-level detail behind the "refunds" export — one row per refund
++// action in range (a refund covering 3 line items is still one row here,
++// matching the Refund document itself; see progress.md Stage 7/9).
++async function getRefundRows(range = 'month') {
++  const startDate = resolveRangeStart(range);
++  const refunds = await Refund.find({ refundDate: { $gte: startDate } }).sort({ refundDate: 1 });
++
++  return refunds.map((r) => ({
++    orderID: r.orderID,
++    customerName: r.customerName,
++    refundAmount: roundMoney(r.refundAmount),
++    itemCount: r.refundedItems.length,
++    reason: r.reason || '',
++    refundDate: r.refundDate.toISOString(),
++    processedBy: r.processedBy,
++  }));
++}
++
++// Snapshot (as-of-now, not date-scoped — same convention the dashboard
++// uses for credit/payable) — one row per customer order that still has a
++// balance due.
++async function getCustomerCreditRows() {
++  const customers = await Customer.find({ 'orders.balanceDue': { $gt: 0 } }, 'customerName mobileNo orders');
++
++  const rows = [];
++  for (const c of customers) {
++    for (const o of c.orders) {
++      if ((o.balanceDue || 0) > 0) {
++        rows.push({
++          customerName: c.customerName,
++          mobileNo: c.mobileNo || '',
++          orderNo: o.orderNo,
++          orderDate: o.orderDate ? o.orderDate.toISOString() : '',
++          totalAmount: roundMoney(o.totalAmount),
++          amountPaid: roundMoney(o.amountPaid),
++          balanceDue: roundMoney(o.balanceDue),
++        });
++      }
++    }
++  }
++  return rows;
++}
++
++// Snapshot mirror of getCustomerCreditRows for what the shop owes
++// suppliers — one row per purchase still carrying a balance.
++async function getSupplierPayableRows() {
++  const suppliers = await Supplier.find({ 'purchases.balanceDue': { $gt: 0 } }, 'supplierName phone purchases');
++
++  const rows = [];
++  for (const s of suppliers) {
++    for (const p of s.purchases) {
++      if ((p.balanceDue || 0) > 0) {
++        rows.push({
++          supplierName: s.supplierName,
++          phone: s.phone || '',
++          purchaseID: p.purchaseID,
++          date: p.date ? p.date.toISOString() : '',
++          totalAmount: roundMoney(p.totalAmount),
++          amountPaid: roundMoney(p.amountPaid),
++          balanceDue: roundMoney(p.balanceDue),
++        });
++      }
++    }
++  }
++  return rows;
++}
++
++module.exports = {
++  resolveRangeStart,
++  getDashboardSummary,
++  getSalesRows,
++  getRefundRows,
++  getCustomerCreditRows,
++  getSupplierPayableRows,
++};
+diff --git a/main.js b/main.js
+index 37f7117..f3596e2 100644
+--- a/main.js
++++ b/main.js
+@@ -10,7 +10,7 @@ const Order = require('./models/Order');
+ const Customer = require('./models/Customers');
+ const PendingBill = require('./models/PendingBill');
+ const Supplier = require('./models/Supplier');
+-const Refund = require('./models/Refund');
++const Refund = require('./models/Refunds');
+ 
+ const logger = require('./lib/logger');
+ const authRoutes = require('./routes/auth');
+@@ -20,6 +20,9 @@ const { AppError } = require('./lib/errors');
+ const { roundMoney } = require('./lib/money');
+ const { getLatestSellingPrice, getLatestBuyingPrice } = require('./lib/pricing');
+ const { escapeRegex, parsePagination, sortAndPaginate } = require('./lib/query');
++const { getDashboardSummary } = require('./lib/reports');
++const exportRoutes = require('./routes/export');
++const syncRoutes = require('./routes/sync');
+ const {
+   isValidEmail,
+   isValidPhone,
+@@ -82,6 +85,24 @@ function parseThreshold(value) {
+ // scripts/createUser.js (there is no public signup route).
+ app.use('/auth', authRoutes);
+ 
++// Stage 10 — CSV export module. Toggleable via ENABLE_EXPORTS; set to
++// "false" in .env to disable/remove the feature without touching
++// anything else here. See routes/export.js and lib/reports.js.
++if (process.env.ENABLE_EXPORTS !== 'false') {
++  app.use('/api/export', exportRoutes);
++} else {
++  logger.info('Export module disabled (ENABLE_EXPORTS=false)');
++}
++
++// Stage 11 — Offline Sync module. Optional, off by default (unlike
++// exports, which default on) — set ENABLE_OFFLINE_SYNC=true in .env to
++// turn it on. See routes/sync.js and lib/offlineSync.js.
++if (process.env.ENABLE_OFFLINE_SYNC === 'true') {
++  app.use('/api/sync', syncRoutes);
++} else {
++  logger.info('Offline sync module disabled (set ENABLE_OFFLINE_SYNC=true to enable)');
++}
++
+ // ── Legacy EJS pages (untouched; kept as a working reference
+ //    while the React frontend migration is in progress) ──────
+ app.get('/logout', (req, res) => {
+@@ -111,92 +132,12 @@ app.get('/customer', asyncHandler(async (req, res) => {
+ }));
+ 
+ // ── JSON read API for the React frontend (public — see CLAUDE.md) ──
++// Stage 9's aggregation now lives in lib/reports.js (getDashboardSummary)
++// so Stage 10's export module can reuse the exact same queries — this
++// route is just a thin JSON wrapper around it.
+ app.get('/dashboard/load', asyncHandler(async (req, res) => {
+   const { range = 'month' } = req.query;
+-  const startDate = new Date();
+-  if (range === 'week') {
+-    startDate.setDate(startDate.getDate() - startDate.getDay()); // back to Sunday
+-    startDate.setHours(0, 0, 0, 0);
+-  } else if (range === 'year') {
+-    startDate.setMonth(0, 1);
+-    startDate.setHours(0, 0, 0, 0);
+-  } else {
+-    startDate.setDate(1); // default: month
+-    startDate.setHours(0, 0, 0, 0);
+-  }
+-
+-  const dashboardData = await Order.aggregate([
+-    { $match: { orderDate: { $gte: startDate } } },
+-    {
+-      $facet: {
+-        // Order.totalAmount is kept live-updated by both edits and
+-        // refunds (Stage 7 recomputes it from whatever's left on the
+-        // order), so summing it here already nets out both — no separate
+-        // subtraction needed. See CLAUDE.md Stage 9.
+-        overallSales: [{ $group: { _id: null, total: { $sum: '$totalAmount' } } }],
+-        totalOrders: [{ $count: 'count' }],
+-        refundedOrders: [{ $match: { status: 'refunded' } }, { $count: 'count' }],
+-        // Distinct from refunds — an order can have edit-type
+-        // editHistory entries (a quantity correction / exchange) without
+-        // ever being refunded.
+-        exchangedOrders: [{ $match: { editHistory: { $elemMatch: { action: 'edit' } } } }, { $count: 'count' }],
+-        customerSales: [
+-          { $group: { _id: '$customerName', total: { $sum: '$totalAmount' } } },
+-          { $sort: { total: -1 } },
+-        ],
+-        productSales: [
+-          { $unwind: '$products' },
+-          {
+-            $group: {
+-              _id: '$products.productID',
+-              totalQuantity: { $sum: '$products.quantity' },
+-              totalRevenue: { $sum: '$products.amount' },
+-            },
+-          },
+-          { $sort: { totalQuantity: -1 } },
+-        ],
+-        totalCustomers: [{ $group: { _id: '$customerName' } }, { $count: 'count' }],
+-        totalProducts: [{ $unwind: '$products' }, { $group: { _id: null, total: { $sum: '$products.quantity' } } }],
+-      },
+-    },
+-  ]);
+-
+-  // Informational only — refundedAmount is NOT subtracted from
+-  // overallSales again (that figure is already net, see above). This is
+-  // "how much did we hand back in refunds this period", a separate fact.
+-  const refundAgg = await Refund.aggregate([
+-    { $match: { refundDate: { $gte: startDate } } },
+-    { $group: { _id: null, total: { $sum: '$refundAmount' } } },
+-  ]);
+-
+-  // Snapshots, not date-scoped — "outstanding" and "payable" are as-of-now
+-  // figures, not tied to the selected reporting window.
+-  const creditAgg = await Customer.aggregate([
+-    { $unwind: { path: '$orders', preserveNullAndEmptyArrays: true } },
+-    { $group: { _id: null, total: { $sum: { $ifNull: ['$orders.balanceDue', 0] } } } },
+-  ]);
+-  const payableAgg = await Supplier.aggregate([
+-    { $unwind: { path: '$purchases', preserveNullAndEmptyArrays: true } },
+-    { $group: { _id: null, total: { $sum: { $ifNull: ['$purchases.balanceDue', 0] } } } },
+-  ]);
+-
+-  const facets = dashboardData[0];
+-  const result = {
+-    range,
+-    startDate,
+-    overallSales: roundMoney(facets.overallSales[0]?.total || 0),
+-    totalOrders: facets.totalOrders[0]?.count || 0,
+-    refundedOrders: facets.refundedOrders[0]?.count || 0,
+-    refundedAmount: roundMoney(refundAgg[0]?.total || 0),
+-    exchangedOrders: facets.exchangedOrders[0]?.count || 0,
+-    totalCustomerCreditOutstanding: roundMoney(creditAgg[0]?.total || 0),
+-    totalSupplierPayable: roundMoney(payableAgg[0]?.total || 0),
+-    customerSales: facets.customerSales || [],
+-    productSales: facets.productSales || [],
+-    totalCustomers: facets.totalCustomers[0]?.count || 0,
+-    totalProducts: facets.totalProducts[0]?.total || 0,
+-  };
+-
++  const result = await getDashboardSummary(range);
+   res.json({ success: true, dashboard: result });
+ }));
+ 
+diff --git a/models/OfflineSale.js b/models/OfflineSale.js
+new file mode 100644
+index 0000000..987f785
+--- /dev/null
++++ b/models/OfflineSale.js
+@@ -0,0 +1,52 @@
++const mongoose = require('mongoose');
++const { Schema } = mongoose;
++
++// One document per offline sale a client durably queued in IndexedDB and
++// then replayed to the server once connectivity returned. This is
++// deliberately its own record, separate from Order/PendingBill: an
++// offline sale is "provisional" until synced (see CLAUDE.md/progress.md
++// Stage 11), and even after resolution this doc is the audit trail of
++// what was captured offline vs. what actually got committed.
++const offlineSaleSchema = new Schema({
++  // Client-generated (crypto.randomUUID() in the browser), unique per
++  // offline sale — the whole point is that retrying a sync (flaky
++  // reconnect, duplicate flush) must never create two orders for the same
++  // offline sale. See lib/offlineSync.js.
++  idempotencyKey: { type: String, required: true, unique: true },
++  // The order ID the client picked for itself while offline (no network
++  // to ask the server for a free one) — informational / preferred, not
++  // guaranteed unique. The server allocates the real orderID at sync time.
++  clientBillID: { type: String, match: /^#\d{4}$/, default: null },
++  cashier: { type: String, required: true },
++  customerName: { type: String, required: true },
++  items: [
++    {
++      productID: { type: String, required: true, match: /^#\d{4}$/ },
++      productName: { type: String, required: true },
++      unitPrice: { type: Number, required: true, min: 0 },
++      quantity: { type: Number, required: true, min: 1 },
++      discount: { type: Number, required: true, min: 0, max: 100, default: 0 },
++      discountType: { type: String, enum: ['none', 'preset', 'manual'], default: 'manual' },
++    },
++  ],
++  paidInput: { type: Number, min: 0, default: 0 },
++  paymentMethod: { type: String, enum: ['cash', 'card', 'other'], default: 'cash' },
++  // When the sale actually happened, per the device's clock, while
++  // offline — kept as the Order's orderDate at sync time so reports stay
++  // scoped to when the sale happened, not when the device reconnected.
++  createdOfflineAt: { type: Date, required: true },
++  // When this sync request first reached the server.
++  receivedAt: { type: Date, default: Date.now },
++  status: {
++    type: String,
++    enum: ['synced', 'conflict', 'rejected'],
++    required: true,
++    default: 'conflict',
++  },
++  resultingOrderID: { type: String, default: null },
++  conflictReason: { type: String, default: '' },
++  resolvedBy: { type: String, default: null },
++  resolvedAt: { type: Date, default: null },
++});
++
++module.exports = mongoose.model('OfflineSale', offlineSaleSchema);
+diff --git a/progress.md b/progress.md
+index 7ec46f9..91cc93f 100644
+--- a/progress.md
++++ b/progress.md
+@@ -95,6 +95,47 @@ since Stage 1, actively broken (auth + missing fields) since Stage 5.
+ - Known inconsistency (documented, not fixed): `refundedOrders`/`exchangedOrders` counts are scoped by the *order's* `orderDate`, while `refundedAmount` is scoped by the *refund's* `refundDate` — an order placed last month but refunded this week counts toward last month's order-count but this week's refund-amount.
+ - Known gap: route still unauthenticated, now exposes more sensitive aggregates (total payables, credit outstanding) than before — widens a pre-existing gap.
+ 
++## Spec Stage 10 — CSV/Excel Export (Modular)
++
++[#spec-stage-10--csvexcel-export-modular](#spec-stage-10--csvexcel-export-modular)
++
++- New `lib/reports.js` — Stage 9's `/dashboard/load` aggregation moved here unchanged (`getDashboardSummary()`), plus new row-level query functions for the export: `getSalesRows()`/`getRefundRows()` (date-scoped like the dashboard), `getCustomerCreditRows()`/`getSupplierPayableRows()` (as-of-now snapshots, same convention as the dashboard's credit/payable figures). `main.js`'s `/dashboard/load` is now a thin wrapper calling `getDashboardSummary()` — same output, same numbers, just relocated so export can reuse it.
++- New `lib/csv.js` — dependency-free RFC 4180 CSV writer (`toCSV(rows, columns)`), so the export module adds zero new npm packages.
++- New `routes/export.js` — `GET /api/export/{summary,sales,refunds,credit,payables}`, all `requireAuth` (matches Orders/Suppliers' access level, not `requireAdmin` — these are the same underlying numbers those screens already show, just reshaped for download). `summary`/`sales`/`refunds` accept `?range=week|month|year`; `credit`/`payables` are snapshots with no range param.
++- Mounted behind `ENABLE_EXPORTS` (`.env`, defaults to enabled): `if (process.env.ENABLE_EXPORTS !== 'false') app.use('/api/export', exportRoutes)`. Setting it to `false` unmounts the route entirely (404, not just blocked) — verified by boot-testing both states.
++- Frontend: new `frontend/src/pages/Reports.jsx` (sidebar "Reports" link enabled, was a disabled placeholder since Stage 1) — range toggle + one card per export type, each triggering a real file download. `api.downloadExport()` added to `lib/api.js`, bypassing the JSON-only `request()` helper since these responses are CSV blobs, not JSON.
++- **Bugs fixed in passing, not part of the Stage 10 spec itself**: `main.js` required `./models/Refund` (file is `Refunds.js`) and `routes/auth.js`/`scripts/createUser.js` required `../models/User` (file is `user.js`) — both `require()` calls were case-mismatched against the actual filenames and would fail at boot on any case-sensitive filesystem (Linux, and most CI). Fixed all three references; verified the module resolves under Node afterward.
++- Verified: frontend builds clean via `vite build`; backend boots clean with the flag on and off; `/api/export/*` returns 401 with no/bad token and 404 when the flag is off; CSV escaping tested directly against commas/quotes/embedded newlines. Not verified against a live MongoDB — no `mongod` available in the sandbox this was built in, so the aggregation queries themselves (identical to Stage 9's, which are already live in production) weren't re-run against real data.
++- Known gap: no `.xlsx` (binary Excel) writer — "Excel export" here means CSV, which Excel opens natively; a true `.xlsx` would need a new dependency (e.g. `exceljs`), which was deliberately avoided to keep the module dependency-free per its own exit criteria.
++
++## Spec Stage 11 — Offline Sync Module (Modular, Optional)
++
++[#spec-stage-11--offline-sync-module-modular-optional](#spec-stage-11--offline-sync-module-modular-optional)
++
++Depends on Stage 3/4 (reservation + drafts) and follows Stage 10's module pattern (own files, own feature flag, mounted with one line). Off by default (`ENABLE_OFFLINE_SYNC=false`), unlike Stage 10's exports which default on — this stage's own spec calls it "optional."
++
++**Design decision, stated up front:** this does *not* refactor `/billing/orderDetails`'s commit transaction to share code with the offline path, unlike Stage 10 sharing `lib/reports.js`. Two things are structurally different for an offline sale: (1) there's no server-held `PendingBill` to source items from, since a draft only exists because the client could reach the server to autosave it; (2) stock was never reserved for the cart, since reservation is itself a live API call. Sharing one function for both would mean branching on those differences throughout — instead, `lib/offlineSync.js` (server) is a self-contained mirror of the same transaction pattern. This keeps the exit criteria literal: the whole module (5 files + 2 mount lines total) can be deleted without touching the live billing flow at all.
++
++**Backend:**
++- `models/OfflineSale.js` — one document per offline sale a client queued and replayed: `idempotencyKey` (client-generated, unique — makes retries safe), captured `items`/`customerName`/`paidInput`/`createdOfflineAt`, `status` (`synced`/`conflict`/`rejected`), `resultingOrderID` once committed.
++- `lib/offlineSync.js` — `syncOfflineSale()`: re-verifies every line's price against the DB's current value (same tolerance rule as Stage 2), checks current availability (`quantity - reserved`) directly rather than consuming a reservation, allocates a real order ID server-side (client's offline-picked ID is only a preference), and commits atomically in a transaction. Order's `orderDate` is set to `createdOfflineAt` (when the sale actually happened), not sync time, so Stage 9's date-scoped reports stay accurate. Never throws for an *expected* conflict (bad price, insufficient stock, missing customer/product) — returns `{ conflictReason }` instead, so the caller can park it for review rather than retry forever.
++- `routes/sync.js` — `POST /api/sync/commit` (idempotent: replaying the same key returns the already-resolved outcome instead of double-committing), `GET /api/sync/conflicts` (admin), `POST /api/sync/conflicts/:id/resolve` with `action: retry|reject` (admin). All `requireAuth`; conflict endpoints additionally `requireAdmin`.
++- Mounted in `main.js` behind `ENABLE_OFFLINE_SYNC` (`.env`, default `false`) — verified route 404s entirely when off, not just blocked.
++
++**Frontend:**
++- `frontend/src/lib/offlineQueue.js` — dependency-free IndexedDB wrapper (own object store, no library) — the durable write queue itself. Queue entries persist across tab close/crash; only cleared explicitly once `synced`, never auto-deleted.
++- `frontend/src/lib/offlineSync.js` — connectivity watcher: distinguishes a genuine network failure (`fetch` throwing `TypeError`) from a real server rejection (4xx/409), only the former leaves a queue entry `pending` for retry. Auto-flushes every 15s and immediately on the browser's `online` event. Started once at the app root (`App.jsx`) so a queued sale still syncs even after the cashier navigates away from Billing.
++- `frontend/.env` — new `VITE_ENABLE_OFFLINE_SYNC` (build-time flag, mirrors the backend's `ENABLE_OFFLINE_SYNC`; both need to agree).
++- `pages/Billing.jsx` — `handleAddToBill` falls back to a local-only, unreserved add (flagged `offline: true`) only on a genuine network error while reserving, using cached availability for a soft client-side check; `handlePreview` falls back to a locally-generated bill ID when the server's uniqueness check is unreachable; `handleGenerateBill` falls back to `enqueueSale()` instead of failing outright, prints a receipt clearly marked "OFFLINE — PENDING SYNC," and resets the cart as if committed. `removeItem` skips the release-stock call for offline-added items (nothing was ever reserved). A banner shows when offline and the module's enabled. Every fallback triggers only on an actual network error, not a legitimate rejection (out of stock, bad discount, etc.) — those behave exactly as before this stage.
++- `pages/Reports.jsx` — two new panels, both gated on the module being enabled: **Offline sales on this device** (reads the local IndexedDB queue directly — counts of pending/synced/conflict, a manual "Sync now," "Clear synced"), and **Offline sync conflicts** (admin-only, reads `GET /api/sync/conflicts`, Retry/Reject buttons). This is the "export screen distinguishes synced vs. pending records" exit criterion — the device-local queue shows what's pending sync, the server-side panel shows what needs a human decision.
++
++**Verified:** backend syntax-checked; server boots clean with the flag on and off; `/api/sync/*` 404s when off, 401 with no token, 403 for non-admin hitting the admin-only endpoints when on; input validation confirmed to run *before* any DB call (fixed an initial ordering bug where the idempotency lookup ran first); frontend builds clean via `vite build` after every integration step. **Not verified:** no live MongoDB in this sandbox (same limitation as Stage 10), so the actual commit/conflict transaction was never run against real data — the price-tolerance and stock-availability logic should get a real end-to-end test (take a device offline, add items, reconnect, confirm the order appears with the right total and stock decremented once, not twice) before relying on it. Also not exercised: the IndexedDB queue itself in an actual browser (built and reasoned through, but this sandbox has no browser to run it in).
++
++**Known gaps / deliberate scope limits:**
++- No conflict resolution for the *reverse* case — an item added offline that turns out to not exist anymore by sync time surfaces as a conflict (correct), but there's no "edit and retry with a substitute item" flow, only retry-as-is or reject.
++- The client's offline-picked order ID is cosmetic only (server always re-allocates at sync time) — if two devices offline-queue using the same client ID, that's fine and expected, but the printed offline receipt's ID may not match the final synced order's ID. Not surfaced anywhere in the UI beyond the receipt itself.
++- No UI limit on how long a sale can sit `pending` — a device offline for weeks will queue indefinitely (IndexedDB has generous per-origin quotas, but this hasn't been stress-tested).
++
+ ## File inventory (as of end of Stage 9)
+ 
+ ## Route inventory (as of end of Stage 9)
+diff --git a/routes/auth.js b/routes/auth.js
+index b73d6ac..8c336f7 100644
+--- a/routes/auth.js
++++ b/routes/auth.js
+@@ -1,6 +1,6 @@
+ const express = require('express');
+ const bcrypt = require('bcrypt');
+-const User = require('../models/User');
++const User = require('../models/user');
+ const { signToken } = require('../middleware/auth');
+ const { asyncHandler } = require('../middleware/errorHandler');
+ const { loginLimiter } = require('../middleware/rateLimit');
+diff --git a/routes/export.js b/routes/export.js
+new file mode 100644
+index 0000000..a9e75aa
+--- /dev/null
++++ b/routes/export.js
+@@ -0,0 +1,142 @@
++// Stage 10 — CSV/Excel export, built as a standalone, toggleable module.
++//
++// Nothing outside this file (and its one mount line + require in main.js)
++// knows this exists. It reads through lib/reports.js — the same
++// aggregation queries Stage 9's dashboard uses — so a number in an
++// exported CSV always matches what the dashboard showed for the same
++// range. This file adds zero new npm dependencies (see lib/csv.js).
++//
++// To remove the whole module: delete this file, delete lib/csv.js,
++// delete the `app.use('/api/export', ...)` line (and its require) in
++// main.js. lib/reports.js stays — /dashboard/load depends on it too.
++const express = require('express');
++const { requireAuth } = require('../middleware/auth');
++const { asyncHandler } = require('../middleware/errorHandler');
++const { toCSV } = require('../lib/csv');
++const {
++  getDashboardSummary,
++  getSalesRows,
++  getRefundRows,
++  getCustomerCreditRows,
++  getSupplierPayableRows,
++} = require('../lib/reports');
++
++const router = express.Router();
++
++const VALID_RANGES = ['week', 'month', 'year'];
++function parseRange(query) {
++  return VALID_RANGES.includes(query.range) ? query.range : 'month';
++}
++
++function sendCSV(res, filenameBase, rows, columns) {
++  const csv = toCSV(rows, columns);
++  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
++  res.setHeader('Content-Disposition', `attachment; filename="${filenameBase}.csv"`);
++  res.send(csv);
++}
++
++// Exports read the same money/customer/supplier data the dashboard and
++// orders/suppliers screens already expose to any authenticated user, just
++// reshaped for download — requireAuth (not requireAdmin) matches that
++// existing access level rather than introducing a stricter one.
++
++// GET /api/export/sales?range=week|month|year — one row per order.
++router.get(
++  '/sales',
++  requireAuth,
++  asyncHandler(async (req, res) => {
++    const range = parseRange(req.query);
++    const rows = await getSalesRows(range);
++    sendCSV(res, `sales-${range}`, rows, [
++      { key: 'orderID', label: 'Order ID' },
++      { key: 'orderDate', label: 'Order Date' },
++      { key: 'customerName', label: 'Customer' },
++      { key: 'cashier', label: 'Cashier' },
++      { key: 'totalAmount', label: 'Total Amount' },
++      { key: 'amountPaid', label: 'Amount Paid' },
++      { key: 'balanceDue', label: 'Balance Due' },
++      { key: 'paymentStatus', label: 'Payment Status' },
++      { key: 'status', label: 'Order Status' },
++    ]);
++  })
++);
++
++// GET /api/export/refunds?range=week|month|year — one row per refund action.
++router.get(
++  '/refunds',
++  requireAuth,
++  asyncHandler(async (req, res) => {
++    const range = parseRange(req.query);
++    const rows = await getRefundRows(range);
++    sendCSV(res, `refunds-${range}`, rows, [
++      { key: 'orderID', label: 'Order ID' },
++      { key: 'refundDate', label: 'Refund Date' },
++      { key: 'customerName', label: 'Customer' },
++      { key: 'refundAmount', label: 'Refund Amount' },
++      { key: 'itemCount', label: 'Items Refunded' },
++      { key: 'reason', label: 'Reason' },
++      { key: 'processedBy', label: 'Processed By' },
++    ]);
++  })
++);
++
++// GET /api/export/credit — snapshot, not date-scoped (matches the
++// dashboard's "as of now" convention for outstanding balances).
++router.get(
++  '/credit',
++  requireAuth,
++  asyncHandler(async (req, res) => {
++    const rows = await getCustomerCreditRows();
++    sendCSV(res, 'customer-credit', rows, [
++      { key: 'customerName', label: 'Customer' },
++      { key: 'mobileNo', label: 'Mobile No' },
++      { key: 'orderNo', label: 'Order No' },
++      { key: 'orderDate', label: 'Order Date' },
++      { key: 'totalAmount', label: 'Total Amount' },
++      { key: 'amountPaid', label: 'Amount Paid' },
++      { key: 'balanceDue', label: 'Balance Due' },
++    ]);
++  })
++);
++
++// GET /api/export/payables — snapshot mirror of /credit for suppliers.
++router.get(
++  '/payables',
++  requireAuth,
++  asyncHandler(async (req, res) => {
++    const rows = await getSupplierPayableRows();
++    sendCSV(res, 'supplier-payables', rows, [
++      { key: 'supplierName', label: 'Supplier' },
++      { key: 'phone', label: 'Phone' },
++      { key: 'purchaseID', label: 'Purchase ID' },
++      { key: 'date', label: 'Purchase Date' },
++      { key: 'totalAmount', label: 'Total Amount' },
++      { key: 'amountPaid', label: 'Amount Paid' },
++      { key: 'balanceDue', label: 'Balance Due' },
++    ]);
++  })
++);
++
++// GET /api/export/summary?range=week|month|year — single-row snapshot of
++// the same headline numbers the dashboard shows, for a quick management
++// export without the line-item detail of /sales.
++router.get(
++  '/summary',
++  requireAuth,
++  asyncHandler(async (req, res) => {
++    const range = parseRange(req.query);
++    const summary = await getDashboardSummary(range);
++    sendCSV(res, `summary-${range}`, [summary], [
++      { key: 'range', label: 'Range' },
++      { key: 'overallSales', label: 'Total Sales' },
++      { key: 'totalOrders', label: 'Total Orders' },
++      { key: 'refundedOrders', label: 'Refunded Orders' },
++      { key: 'refundedAmount', label: 'Refunded Amount' },
++      { key: 'exchangedOrders', label: 'Exchanged Orders' },
++      { key: 'totalCustomerCreditOutstanding', label: 'Customer Credit Outstanding' },
++      { key: 'totalSupplierPayable', label: 'Supplier Payable' },
++    ]);
++  })
++);
++
++module.exports = router;
+diff --git a/routes/sync.js b/routes/sync.js
+new file mode 100644
+index 0000000..6431c6c
+--- /dev/null
++++ b/routes/sync.js
+@@ -0,0 +1,180 @@
++// Stage 11 — Offline Sync Module. Entirely optional and self-contained:
++// delete this file, lib/offlineSync.js, models/OfflineSale.js, and the
++// one mount line + require in main.js, and nothing else changes. Nothing
++// in the live billing/draft/reservation flow (Stage 3/4) depends on this
++// existing — see lib/offlineSync.js's header comment for why the commit
++// logic is a separate path rather than a shared one.
++const express = require('express');
++const OfflineSale = require('../models/OfflineSale');
++const { requireAuth, requireAdmin } = require('../middleware/auth');
++const { asyncHandler } = require('../middleware/errorHandler');
++const { AppError } = require('../lib/errors');
++const { isValidProductId, isValidDiscount } = require('../lib/validators');
++const { roundMoney } = require('../lib/money');
++const { syncOfflineSale } = require('../lib/offlineSync');
++const logger = require('../lib/logger');
++
++const router = express.Router();
++
++function validateItems(items) {
++  if (!Array.isArray(items) || items.length === 0) return null;
++  const clean = [];
++  for (const it of items) {
++    if (
++      !isValidProductId(it.productID) ||
++      typeof it.productName !== 'string' ||
++      !it.productName.trim() ||
++      !Number.isFinite(Number(it.unitPrice)) ||
++      Number(it.unitPrice) < 0 ||
++      !Number.isInteger(it.quantity) ||
++      it.quantity < 1 ||
++      !isValidDiscount(it.discount)
++    ) {
++      return null; // one bad line invalidates the whole submission — this
++      // is a one-shot commit attempt, not a silently-cleaned autosave.
++    }
++    clean.push({
++      productID: it.productID,
++      productName: it.productName.trim(),
++      unitPrice: roundMoney(it.unitPrice),
++      quantity: it.quantity,
++      discount: roundMoney(it.discount),
++      discountType: ['none', 'preset', 'manual'].includes(it.discountType) ? it.discountType : 'manual',
++    });
++  }
++  return clean;
++}
++
++// POST /api/sync/commit — replay one queued offline sale. Idempotent by
++// design: the same idempotencyKey retried (flaky reconnect, duplicate
++// flush from the client's queue) returns the same result instead of
++// creating a second order.
++router.post(
++  '/commit',
++  requireAuth,
++  asyncHandler(async (req, res) => {
++    const { idempotencyKey, customerName, items, paidInput, paymentMethod, clientBillID, createdOfflineAt } = req.body;
++
++    if (typeof idempotencyKey !== 'string' || idempotencyKey.length < 8) {
++      return res.status(400).json({ success: false, message: 'Missing or invalid idempotency key.' });
++    }
++    if (!customerName || typeof customerName !== 'string') {
++      return res.status(400).json({ success: false, message: 'Customer name is required.' });
++    }
++    const cleanItems = validateItems(items);
++    if (!cleanItems) {
++      return res.status(400).json({ success: false, message: 'This offline sale has invalid or missing items.' });
++    }
++    const offlineTimestamp = new Date(createdOfflineAt);
++    if (!createdOfflineAt || Number.isNaN(offlineTimestamp.getTime())) {
++      return res.status(400).json({ success: false, message: 'Missing or invalid offline timestamp.' });
++    }
++
++    // Already resolved (by this call or an earlier retry that raced it) —
++    // hand back the existing outcome rather than re-processing.
++    const existing = await OfflineSale.findOne({ idempotencyKey });
++    if (existing) {
++      return res.status(existing.status === 'synced' ? 200 : 409).json({
++        success: existing.status === 'synced',
++        alreadyProcessed: true,
++        status: existing.status,
++        orderID: existing.resultingOrderID,
++        message:
++          existing.status === 'synced'
++            ? 'Already synced.'
++            : existing.conflictReason || 'This offline sale is already flagged for review.',
++      });
++    }
++
++    // Build the record first (status defaults to 'conflict') so that even
++    // if the process crashes mid-commit, this offline sale is durably on
++    // the server and shows up for admin review rather than being lost.
++    const offlineSale = await OfflineSale.create({
++      idempotencyKey,
++      clientBillID: /^#\d{4}$/.test(clientBillID || '') ? clientBillID : null,
++      cashier: req.user.username,
++      customerName: customerName.trim().replace(/\s+/g, ' '),
++      items: cleanItems,
++      paidInput: Number.isFinite(Number(paidInput)) && Number(paidInput) >= 0 ? roundMoney(paidInput) : 0,
++      paymentMethod: ['cash', 'card', 'other'].includes(paymentMethod) ? paymentMethod : 'cash',
++      createdOfflineAt: offlineTimestamp,
++    });
++
++    const { order, conflictReason } = await syncOfflineSale(offlineSale, { cashier: req.user.username });
++
++    if (order) {
++      offlineSale.status = 'synced';
++      offlineSale.resultingOrderID = order.orderID;
++      await offlineSale.save();
++      logger.info({ idempotencyKey, orderID: order.orderID, cashier: req.user.username }, 'Offline sale synced');
++      return res.status(200).json({ success: true, status: 'synced', orderID: order.orderID });
++    }
++
++    offlineSale.status = 'conflict';
++    offlineSale.conflictReason = conflictReason || 'Could not be synced.';
++    await offlineSale.save();
++    logger.warn({ idempotencyKey, cashier: req.user.username, reason: conflictReason }, 'Offline sale flagged for review');
++    return res.status(409).json({ success: false, status: 'conflict', message: offlineSale.conflictReason });
++  })
++);
++
++// GET /api/sync/conflicts — admin queue of offline sales needing a human
++// decision (stock ran out in the meantime, price moved, customer/product
++// deleted, etc).
++router.get(
++  '/conflicts',
++  requireAuth,
++  requireAdmin,
++  asyncHandler(async (req, res) => {
++    const conflicts = await OfflineSale.find({ status: 'conflict' }).sort({ receivedAt: 1 });
++    res.json({ success: true, conflicts });
++  })
++);
++
++// POST /api/sync/conflicts/:id/resolve — admin decides. 'retry' re-runs
++// the same commit logic (useful once stock's been topped up); 'reject'
++// permanently discards it — no order is ever created for a rejected sale.
++router.post(
++  '/conflicts/:id/resolve',
++  requireAuth,
++  requireAdmin,
++  asyncHandler(async (req, res) => {
++    const { action, reason } = req.body;
++    if (!['retry', 'reject'].includes(action)) {
++      return res.status(400).json({ success: false, message: 'action must be "retry" or "reject".' });
++    }
++
++    const offlineSale = await OfflineSale.findById(req.params.id);
++    if (!offlineSale) {
++      throw new AppError(404, 'Offline sale not found.');
++    }
++    if (offlineSale.status !== 'conflict') {
++      return res.status(409).json({ success: false, message: `Already resolved (${offlineSale.status}).` });
++    }
++
++    if (action === 'reject') {
++      offlineSale.status = 'rejected';
++      offlineSale.conflictReason = reason || offlineSale.conflictReason;
++      offlineSale.resolvedBy = req.user.username;
++      offlineSale.resolvedAt = new Date();
++      await offlineSale.save();
++      return res.json({ success: true, status: 'rejected' });
++    }
++
++    // action === 'retry'
++    const { order, conflictReason } = await syncOfflineSale(offlineSale, { cashier: offlineSale.cashier });
++    offlineSale.resolvedBy = req.user.username;
++    offlineSale.resolvedAt = new Date();
++    if (order) {
++      offlineSale.status = 'synced';
++      offlineSale.resultingOrderID = order.orderID;
++      await offlineSale.save();
++      return res.json({ success: true, status: 'synced', orderID: order.orderID });
++    }
++    offlineSale.conflictReason = conflictReason || offlineSale.conflictReason;
++    await offlineSale.save(); // stays 'conflict', resolvedBy/At updated for audit trail of the attempt
++    return res.status(409).json({ success: false, status: 'conflict', message: offlineSale.conflictReason });
++  })
++);
++
++module.exports = router;
+diff --git a/scripts/createUser.js b/scripts/createUser.js
+index fec28bf..1fa483d 100644
+--- a/scripts/createUser.js
++++ b/scripts/createUser.js
+@@ -1,7 +1,7 @@
+ require('dotenv').config();
+ const mongoose = require('mongoose');
+ const bcrypt = require('bcrypt');
+-const User = require('../models/User');
++const User = require('../models/user');
+ 
+ async function main() {
+   const [, , username, password, role = 'cashier'] = process.argv;

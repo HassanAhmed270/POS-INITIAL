@@ -1,6 +1,8 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { useEffect } from 'react';
 import { AuthProvider } from './lib/AuthContext';
 import ProtectedRoute from './components/ProtectedRoute';
+import { startOfflineSyncWatcher } from './lib/offlineSync';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import Billing from './pages/Billing';
@@ -8,8 +10,18 @@ import Products from './pages/Products';
 import Customers from './pages/Customers';
 import Suppliers from './pages/Suppliers';
 import Orders from './pages/Orders';
+import Reports from './pages/Reports';
 
 export default function App() {
+  // Stage 11 — starts the background flush loop for any offline sales
+  // queued in IndexedDB. No-op entirely when VITE_ENABLE_OFFLINE_SYNC
+  // isn't "true" (see lib/offlineSync.js) — safe to leave mounted
+  // whether or not the module is enabled.
+  useEffect(() => {
+    const stop = startOfflineSyncWatcher();
+    return stop;
+  }, []);
+
   return (
     <AuthProvider>
       <BrowserRouter>
@@ -60,6 +72,14 @@ export default function App() {
             element={
               <ProtectedRoute>
                 <Orders />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/reports"
+            element={
+              <ProtectedRoute>
+                <Reports />
               </ProtectedRoute>
             }
           />

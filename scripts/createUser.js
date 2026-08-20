@@ -1,7 +1,7 @@
 require('dotenv').config();
 const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
-const User = require('../models/User');
+const User = require('../models/user');
 
 async function main() {
   const [, , username, password, role = 'cashier'] = process.argv;

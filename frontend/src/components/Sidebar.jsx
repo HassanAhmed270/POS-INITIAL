@@ -8,7 +8,7 @@ const links = [
   { to: '/customers', label: 'Customers' },
   { to: '/suppliers', label: 'Suppliers' },
   { to: '/orders', label: 'Orders' },
-  { to: '/reports', label: 'Reports', disabled: true },
+  { to: '/reports', label: 'Reports' },
   { to: '/workers', label: 'Workers', disabled: true },
   { to: '/webpage', label: 'Webpage', disabled: true },
 ];

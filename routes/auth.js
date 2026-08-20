@@ -1,6 +1,6 @@
 const express = require('express');
 const bcrypt = require('bcrypt');
-const User = require('../models/User');
+const User = require('../models/user');
 const { signToken } = require('../middleware/auth');
 const { asyncHandler } = require('../middleware/errorHandler');
 const { loginLimiter } = require('../middleware/rateLimit');

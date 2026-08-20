@@ -4,6 +4,8 @@ import { useAuth } from '../lib/AuthContext';
 import { api } from '../lib/api';
 import { roundMoney, formatMoney } from '../lib/money';
 import { printReceipt } from '../lib/print';
+import { isOfflineSyncEnabled, enqueueSale } from '../lib/offlineQueue';
+import { isNetworkError, flushQueue } from '../lib/offlineSync';
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const emptyCustomerForm = { customerName: '', mobileNo: '', emergencyMobile: '', email: '', address: '' };
@@ -32,6 +34,31 @@ export default function Billing() {
   const [billId, setBillId] = useState(null);
   const [paid, setPaid] = useState('');
   const [paymentMethod, setPaymentMethod] = useState('cash');
+
+  // Stage 11 — offline sync. `isOnline` mirrors the browser's own signal;
+  // it's the fast/local half of "are we connected" (an actual failed
+  // request is still the real source of truth — see handleAddToBill/
+  // handleGenerateBill below, which fall back on a genuine network error
+  // even if isOnline was stale). Only ever consulted when the module is
+  // enabled (VITE_ENABLE_OFFLINE_SYNC=true) — otherwise Billing behaves
+  // exactly as it did before Stage 11.
+  const offlineSyncEnabled = isOfflineSyncEnabled();
+  const [isOnline, setIsOnline] = useState(typeof navigator === 'undefined' ? true : navigator.onLine);
+
+  useEffect(() => {
+    if (!offlineSyncEnabled) return;
+    const goOnline = () => {
+      setIsOnline(true);
+      flushQueue(); // don't wait for the next 15s tick — try immediately on reconnect
+    };
+    const goOffline = () => setIsOnline(false);
+    window.addEventListener('online', goOnline);
+    window.addEventListener('offline', goOffline);
+    return () => {
+      window.removeEventListener('online', goOnline);
+      window.removeEventListener('offline', goOffline);
+    };
+  }, [offlineSyncEnabled]);
 
 
   const loadProducts = () =>
@@ -231,6 +258,40 @@ export default function Billing() {
     try {
       reserved = await api.reserveStock(selectedProductId, quantity);
     } catch (err) {
+      // Stage 11: a genuine network failure (not "stock unavailable" —
+      // that's a normal rejected response, not a thrown network error)
+      // while the module is enabled means we can't reserve, but the sale
+      // can still be captured provisionally and re-validated at sync
+      // time (see lib/offlineSync.js, routes/sync.js). Anything else
+      // (insufficient stock, invalid product) behaves exactly as before.
+      if (offlineSyncEnabled && isNetworkError(err)) {
+        const alreadyInCart = Object.values(billingItems)
+          .filter((it) => it.productCode === selectedProductId.replace('#', ''))
+          .reduce((sum, it) => sum + it.quantity, 0);
+        const softAvailable = (product.available ?? product.quantity - (product.reserved || 0)) - alreadyInCart;
+        if (softAvailable < quantity) {
+          alert(`Offline — based on the last known stock, only ${Math.max(softAvailable, 0)} unit(s) of this item look available. Add fewer, or confirm with the customer.`);
+          return;
+        }
+        const nextItemNo = itemNo + 1;
+        setItemNo(nextItemNo);
+        setBillingItems((prev) => ({
+          ...prev,
+          [nextItemNo]: {
+            productCode: selectedProductId.replace('#', ''),
+            itemName: itemForm.productName,
+            unitPrice,
+            quantity,
+            discount: roundMoney(discount),
+            discountType: discount > 0 ? itemForm.discountType : 'none',
+            offline: true, // never reserved server-side — re-validated at sync time
+          },
+        }));
+        setItemForm({ productId: '', productName: '', unitPrice: '', quantity: '', discount: '', discountType: 'none' });
+        setShowDiscount(false);
+        setSelectedProductId(null);
+        return;
+      }
       alert(err.message || 'Could not reserve stock for this item.');
       await loadProducts(); // someone else's sale likely just changed availability — resync
       return;
@@ -275,15 +336,35 @@ export default function Billing() {
       // Ask the server for a free order id, same retry loop as the original app.
       // (kept small since this is a low-volume single-shop system)
       for (let i = 0; i < 20; i++) {
-        const data = await api.getUniqueOrderId(candidate);
-        if (!data.exists) break;
-        const num = (parseInt(candidate.slice(1)) + 1) % 10000;
-        candidate = '#' + num.toString().padStart(4, '0');
+        try {
+          const data = await api.getUniqueOrderId(candidate);
+          if (!data.exists) break;
+          const num = (parseInt(candidate.slice(1)) + 1) % 10000;
+          candidate = '#' + num.toString().padStart(4, '0');
+        } catch (err) {
+          // Stage 11: can't ask the server offline — use this candidate
+          // as a local placeholder. It's informational only; the real ID
+          // gets allocated server-side at sync time (see
+          // lib/offlineSync.js's allocateOrderId), so a collision here
+          // just means the synced order ends up with a different number.
+          if (offlineSyncEnabled && isNetworkError(err)) break;
+          throw err;
+        }
       }
       setBillId(candidate);
+      if (offlineSyncEnabled && !isOnline) {
+        // No server draft to persist to while offline — the whole cart
+        // stays client-side until Generate Bill queues it (see
+        // handleGenerateBill).
+        setView('preview');
+        return;
+      }
       // Persist the reserved ID immediately rather than waiting for the
       // debounce — if the person clicks Generate Bill in the next second,
-      // the server needs to already know this bill's ID.
+      // the server needs to already know this bill's ID. (saveDraftNow
+      // already swallows its own errors — see its definition above — so
+      // a network hiccup here just means the debounced autosave picks it
+      // up later instead.)
       await saveDraftNow(undefined, undefined, candidate);
       setView('preview');
     } catch (err) {
@@ -306,6 +387,11 @@ export default function Billing() {
     });
 
     try {
+      // Offline-added items were never reserved server-side (Stage 11) —
+      // nothing to release.
+      if (item.offline) {
+        return;
+      }
       const released = await api.releaseStock(`#${item.productCode}`, item.quantity);
       setProducts((prev) =>
         prev.map((p) =>
@@ -340,6 +426,36 @@ export default function Billing() {
       console.error('Failed to discard draft:', err.message);
     }
     await loadProducts();
+  };
+
+  // Extracted from the original inline receipt-building so both the
+  // normal (online) success path and the Stage 11 offline-queued path
+  // can share it — `offline` just adds a visible marker so the printed
+  // slip is honest about not being a confirmed sale yet.
+  const printReceiptFor = (total, paidNum, offline = false) => {
+    const rows = Object.entries(billingItems)
+      .map(([key, item]) => {
+        const subtotal = item.unitPrice * item.quantity;
+        const net = roundMoney(subtotal - subtotal * (item.discount / 100));
+        return `<tr><td>${key}</td><td>${item.productCode}</td><td>${item.itemName}</td><td>${formatMoney(item.unitPrice)}</td><td>${item.quantity}</td><td>${formatMoney(subtotal)}</td><td>${item.discount}%</td><td>${formatMoney(net)}</td></tr>`;
+      })
+      .join('');
+
+    const html = `
+      <h2 style="text-align:center;font-weight:bold;font-size:20px;border-bottom:1px solid #ddd;padding-bottom:8px;">Receipt</h2>
+      <div style="margin:8px 0;font-weight:600;">Bill ID: ${billId}</div>
+      ${offline ? '<div style="margin:8px 0;font-weight:700;color:#b45309;">OFFLINE — PENDING SYNC (not yet confirmed)</div>' : ''}
+
+      <table>
+        <thead><tr><th>S.no</th><th>Code</th><th>Product</th><th>Price</th><th>Qty</th><th>Total</th><th>Save</th><th>Net</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div class="totals"><span>Grand Total</span><span>${formatMoney(total)}</span></div>
+      <div class="totals"><span>Paid</span><span>${formatMoney(paidNum)}</span></div>
+      <div class="totals"><span>${paidNum >= total ? 'Change' : 'Balance Due (Credit)'}</span><span>${formatMoney(Math.abs(paidNum - total))}</span></div>
+      <div style="margin-top:8px;">Customer: ${customer}</div>
+    `;
+    printReceipt(html);
   };
 
   const handleGenerateBill = async () => {
@@ -383,34 +499,46 @@ export default function Billing() {
         return;
       }
 
-      const rows = Object.entries(billingItems)
-        .map(([key, item]) => {
-          const subtotal = item.unitPrice * item.quantity;
-          const net = roundMoney(subtotal - subtotal * (item.discount / 100));
-          return `<tr><td>${key}</td><td>${item.productCode}</td><td>${item.itemName}</td><td>${formatMoney(item.unitPrice)}</td><td>${item.quantity}</td><td>${formatMoney(subtotal)}</td><td>${item.discount}%</td><td>${formatMoney(net)}</td></tr>`;
-        })
-        .join('');
-
-      const html = `
-        <h2 style="text-align:center;font-weight:bold;font-size:20px;border-bottom:1px solid #ddd;padding-bottom:8px;">Receipt</h2>
-        <div style="margin:8px 0;font-weight:600;">Bill ID: ${billId}</div>
-
-        <table>
-          <thead><tr><th>S.no</th><th>Code</th><th>Product</th><th>Price</th><th>Qty</th><th>Total</th><th>Save</th><th>Net</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-        <div class="totals"><span>Grand Total</span><span>${formatMoney(total)}</span></div>
-        <div class="totals"><span>Paid</span><span>${formatMoney(paidNum)}</span></div>
-        <div class="totals"><span>${paidNum >= total ? 'Change' : 'Balance Due (Credit)'}</span><span>${formatMoney(Math.abs(paidNum - total))}</span></div>
-        <div style="margin-top:8px;">Customer: ${customer}</div>
-      `;
-      printReceipt(html);
-
+      printReceiptFor(total, paidNum);
       alert('Order saved successfully.');
       resetBill();
       setCustomer('unknown');
       await loadProducts();
     } catch (err) {
+      // Stage 11: a genuine network failure — not a rejected order — is
+      // the one case where we don't just show an error. The whole cart
+      // gets queued as one offline sale (durable in IndexedDB) instead of
+      // lost, and re-validated against live stock/prices when the queue
+      // flushes (see lib/offlineSync.js, routes/sync.js). Any other
+      // failure (validation, stock conflict while actually online, etc.)
+      // behaves exactly as before Stage 11.
+      if (offlineSyncEnabled && isNetworkError(err)) {
+        try {
+          await enqueueSale({
+            idempotencyKey: crypto.randomUUID(),
+            clientBillID: billId,
+            customerName: customer,
+            items: Object.values(billingItems).map((it) => ({
+              productID: `#${it.productCode}`,
+              productName: it.itemName,
+              unitPrice: it.unitPrice,
+              quantity: it.quantity,
+              discount: it.discount,
+              discountType: it.discountType || 'manual',
+            })),
+            paidInput: paidNum,
+            paymentMethod,
+            createdOfflineAt: new Date().toISOString(),
+          });
+          printReceiptFor(total, paidNum, true);
+          alert('No connection — this bill has been saved on this device and will sync automatically once you\'re back online.');
+          resetBill();
+          setCustomer('unknown');
+        } catch (queueErr) {
+          alert('Could not save this bill, even offline: ' + queueErr.message);
+        }
+        return;
+      }
       alert('Error saving order: ' + err.message);
     }
   };
@@ -474,6 +602,13 @@ export default function Billing() {
           </div>
 
           {error && <p className="text-red-600 text-sm">{error}</p>}
+
+          {offlineSyncEnabled && !isOnline && (
+            <div className="bg-amber-50 border border-amber-300 text-amber-800 text-sm rounded-lg px-4 py-2">
+              You're offline. Bills can still be created — they'll be saved on this device and synced automatically
+              once you're back online. Stock and prices will be re-checked at that point.
+            </div>
+          )}
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 h-[600px]">
             <div className="md:col-span-2 bg-white rounded-lg shadow p-4 overflow-y-auto">

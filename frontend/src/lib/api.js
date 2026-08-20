@@ -69,8 +69,50 @@ getCustomers: (params = {}) => request(`/api/customers?${new URLSearchParams(par
   saveDraft: (payload) => request('/billing/draft', { method: 'POST', body: JSON.stringify(payload) }),
   discardDraft: () => request('/billing/draft', { method: 'DELETE' }),
 
+  // Offline sync (Stage 11) — optional module, see lib/offlineQueue.js /
+  // lib/offlineSync.js for the client-side queue this talks to.
+  syncOfflineSale: (payload) => request('/api/sync/commit', { method: 'POST', body: JSON.stringify(payload) }),
+  getSyncConflicts: () => request('/api/sync/conflicts'),
+  resolveSyncConflict: (id, action, reason) =>
+    request(`/api/sync/conflicts/${encodeURIComponent(id)}/resolve`, {
+      method: 'POST',
+      body: JSON.stringify({ action, reason }),
+    }),
+
   // Dashboard
  getDashboard: (range = 'month') => request(`/dashboard/load?range=${encodeURIComponent(range)}`),
+
+  // Exports (Stage 10) — these return CSV, not JSON, so they bypass the
+  // shared `request()` helper (which assumes JSON/text-parsed bodies) and
+  // are triggered as a real browser download instead.
+  downloadExport: async (type, range) => {
+    const params = range ? `?range=${encodeURIComponent(range)}` : '';
+    const token = tokenStore.get();
+    const res = await fetch(`${BASE}/api/export/${type}${params}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (res.status === 401) {
+      tokenStore.clear();
+      window.dispatchEvent(new CustomEvent('auth:unauthorized'));
+    }
+    if (!res.ok) {
+      const contentType = res.headers.get('content-type') || '';
+      const body = contentType.includes('application/json') ? await res.json() : await res.text();
+      throw new Error(body?.message || 'Export failed.');
+    }
+    const blob = await res.blob();
+    const disposition = res.headers.get('content-disposition') || '';
+    const match = disposition.match(/filename="([^"]+)"/);
+    const filename = match ? match[1] : `${type}.csv`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  },
 
   // Suppliers (Stage 5)
 getSuppliers: (params = {}) => request(`/api/suppliers?${new URLSearchParams(params)}`),
