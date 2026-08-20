@@ -1,9 +1,10 @@
 # Billing System — Frontend (React + Vite + Tailwind)
 
-This is the new React frontend for the POS billing system. It replaces the
-server-rendered EJS views under `../views` page by page. The Express +
-MongoDB backend (`../main.js`) is unchanged and still owns all data — this
-app only talks to it over JSON.
+This is the React frontend for the POS billing system — the only UI the
+app has. The Express + MongoDB backend (`../main.js`) owns all data and
+never renders HTML itself; this app talks to it over JSON only, and in
+production `../main.js` serves this app's build output directly (see
+`../CLAUDE.md` → "How a request is served").
 
 Tailwind is installed as a package (`@tailwindcss/vite`), **not** loaded
 from a CDN — see `src/index.css` (`@import "tailwindcss"`) and
@@ -14,12 +15,15 @@ from a CDN — see `src/index.css` (`@import "tailwindcss"`) and
 ```
 frontend/
   src/
-    pages/        One file per screen: Login, Dashboard, Billing, Products, Customers
+    pages/        One file per screen: Login, Dashboard, Billing, Products,
+                   Customers, Suppliers, Orders, Reports
     components/   Shared UI: Sidebar, Topbar, ProtectedRoute
     lib/
-      api.js          Single place every backend call goes through
-      AuthContext.jsx Client-side "session" (username in sessionStorage) — mirrors
-                       the original app, which has no real credential check either
+      api.js            Single place every backend call goes through
+      AuthContext.jsx   Client-side session (JWT + user, both in localStorage) —
+                         see useAuth()'s isAdmin
+      offlineQueue.js   Stage 11 — IndexedDB durable write queue (optional)
+      offlineSync.js    Stage 11 — connectivity watcher / auto-flush (optional)
     index.css      Tailwind entry + theme tokens (brand colors)
     App.jsx         Routes
     main.jsx        React entry point
@@ -32,31 +36,35 @@ You need the backend running first (from the repo root):
 
 ```bash
 npm install
-npm start          # starts Express + Mongo on :3000
+cp .env.example .env   # set JWT_SECRET at minimum
+npm start               # starts Express + Mongo on :3000
 ```
 
-Then, in this folder:
+Then, in this folder, for **development**:
 
 ```bash
 npm install
-npm run dev         # Vite dev server on :5173, proxies API calls to :3000
+npm run dev              # Vite dev server on :5173, proxies API calls to :3000
 ```
 
-Build for production with `npm run build` (outputs to `frontend/dist`). To
-serve the built app, either point Express at `frontend/dist` as a static
-folder in a later stage, or host it separately and set `VITE_API_BASE` to
-the backend's URL.
+For **production** (single server, `main.js` serves this build):
+
+```bash
+npm run build            # outputs to frontend/dist
+# then run `npm start` from the repo root as usual — main.js serves
+# frontend/dist automatically once it exists (no extra config)
+```
+
+Stage 11's offline sync module additionally needs `VITE_ENABLE_OFFLINE_SYNC=true`
+in a `frontend/.env` file (build-time), matching the backend's
+`ENABLE_OFFLINE_SYNC=true` — both must agree or the feature stays off on
+one side.
 
 ## Where data comes from
 
-Every read/write goes through `src/lib/api.js`. Two small JSON endpoints
-were added to `main.js` for this stage (the old EJS routes were left alone):
+Every read/write goes through `src/lib/api.js`. It talks to the same JSON
+API described in `../CLAUDE.md` — `/api/*`, `/billing/*`, `/customer/*`,
+`/product/*`, `/supplier/*`, `/dashboard/load`, plus the optional
+`/api/export/*` and `/api/sync/*` modules. If you add a call under a new
+path prefix, also add that prefix to `vite.config.js`'s dev proxy list.
 
-- `GET /api/products` / `GET /api/customers` — list data (the EJS routes
-  fetched this server-side and injected it into the template; React needs
-  it as JSON instead)
-- `POST /api/product` — same logic as `POST /product`, but returns JSON
-  instead of a redirect (the old route is form-submit-shaped)
-
-Everything else (`/billing/*`, `/customer/*`, `/product/undo`,
-`/product/:id` DELETE) already returned JSON and is reused as-is.

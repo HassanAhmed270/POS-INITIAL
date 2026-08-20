@@ -2,126 +2,200 @@
 
 This file gives Claude Code (claude.ai/code) the context it needs to work in this repository.
 
+Companion to `progress.md`, which is the fast-reference, stage-by-stage
+log (what exists, where, what's still open). This file has the narrative
+detail; read `progress.md` first, come here for the "why."
+
 ## What this project is
 
-A simple **Point-of-Sale / Billing Management System** for a single shop, built as a monolithic Express + EJS server-rendered app backed by MongoDB. There is no build step for the backend and no frontend framework — pages are rendered server-side with EJS and given interactivity via inline `<script>` blocks using `fetch()` against JSON API routes on the same server.
+A **Point-of-Sale / Billing Management System** for a single shop: an
+Express + MongoDB (Mongoose) JSON API backend, paired with a React (Vite +
+Tailwind) frontend. This is a plain **MERN** app — there is no
+server-rendered UI. `main.js` never renders HTML itself; it either answers
+JSON under `/api`, `/auth`, and a handful of legacy-shaped-but-still-JSON
+routes (`/billing/*`, `/product/*`, `/customer/*`, `/supplier/*`,
+`/dashboard/load`), or — for every other GET request — serves the built
+React app from `frontend/dist` and lets React Router decide what to show.
 
-Core entities: **Products**, **Customers**, **Orders** (bills). The app has four screens: Login, Dashboard, Billing (create invoice), Products, Customers.
+Core entities: **Products**, **Customers**, **Orders** (bills), plus
+**Suppliers**, **Refunds**, **PendingBill** (draft carts), and (optional
+module) **OfflineSale**. Screens: Login, Dashboard, Billing, Products,
+Customers, Suppliers, Orders, Reports.
+
+There used to be a second, server-rendered EJS UI (`views/`) built
+alongside the JSON API while the React frontend was being written
+screen-by-screen. That's gone now — see "History" below.
 
 ## Commands
 
 ```bash
-npm install          # install dependencies
-npm start             # run the server via nodemon (main.js), reads PORT env var, defaults to 3000
-npm run build          # one-off Tailwind CSS build: src/input.css -> public/css/output.css
-npm run watch           # Tailwind build in watch mode (run during frontend/EJS work)
+npm install                # backend deps
+npm start                  # run the API server via nodemon (main.js), PORT env var, defaults to 3000
+npm run create-user        # create a login (username/password/role) — see scripts/createUser.js
+npm run build-frontend     # builds frontend/dist via `npm --prefix frontend run build`
+
+cd frontend
+npm install                # frontend deps
+npm run dev                # Vite dev server on :5173, proxies /api, /auth, /billing, /product,
+                            # /customer, /supplier, /dashboard/load to :3000
+npm run build               # production build -> frontend/dist (this is what main.js serves)
 ```
 
-There are no automated tests (`npm test` is a stub that exits with an error) and no linter configured. There is no `.env` handling — MongoDB URI is hardcoded (see below).
+There are no automated tests (`npm test` is a stub) and no backend linter
+configured (frontend has `oxlint`, run via `cd frontend && npm run lint`).
 
-MongoDB must be running locally (`mongodb://localhost:27017/billing_system`) for the app to function; without it the server still starts but every DB-backed route will fail.
+**MongoDB must be running as a replica set**, not a plain standalone
+`mongod` — order checkout (`POST /billing/orderDetails`), the offline sync
+commit path, and a few other mutations use multi-document transactions,
+which only work against a replica set (or `mongos`). Locally: run `mongod
+--replSet rs0`, then `rs.initiate()` once in `mongosh`. The server still
+boots against a standalone instance but warns loudly at startup, and
+checkout will fail.
+
+Copy `.env.example` to `.env` before running — `JWT_SECRET` is required;
+the app throws at boot without it (see `middleware/auth.js`).
 
 ## Architecture
 
-- **`main.js`** — single entry point containing the Express app, all routes, and the MongoDB connection. There is no router/controller/service split; everything (including business logic like restocking math and dashboard aggregation) lives inline in route handlers.
-- **`models/`** — three Mongoose schemas:
-  - `Product.js` — `productID` (format `#0000`, regex-enforced, unique), `productName`, `category`, `quantity`, `unitPrice` (array of `{price, date}` — a price *history*, not a single field), `supplier`, `hidden`.
-  - `Customers.js` — `customerName` (unique, whitespace-normalized via a Mongoose `set`), `mobileNo`, `emergencyMobile`, `email`, `address`, and an embedded `orders` array (`orderNo` + `orderDate` only — a lightweight reference, not the full order).
-  - `Order.js` — `orderID` (format `#0000`), `customerName`, `products` (embedded array of `{productID, quantity, amount, discount}`), `cashier`, `totalAmount`, `orderDate`.
-- **`views/`** — EJS templates, one per page (`login`, `dashboard`, `billing`, `product`, `customer`, `newcustomer`), plus `sidebar.ejs` which is `include`d into the authenticated pages for nav. Almost all client-side logic (cart building, search/filter, modals, undo-toasts after delete) is written as vanilla JS inside `<script>` tags at the bottom of each `.ejs` file — this is where most "frontend logic" actually lives, not in separate JS files.
-- **`public/css/output.css`** — compiled Tailwind output, generated from **`src/input.css`** by the `build`/`watch` scripts. `login.ejs` links this compiled file; other pages instead load the Tailwind CDN script directly (`<script src="https://cdn.tailwindcss.com">`) — the two approaches are mixed inconsistently across views.
+- **`main.js`** — single entry point: Express app, MongoDB connection,
+  most routes inline (some split into `routes/`), then the static
+  frontend-serving block, then the centralized error handler.
+- **`models/`** — Mongoose schemas: `Product`, `Customers`, `Order`,
+  `PendingBill` (Stage 4 draft carts), `Supplier`, `Refunds`, `user`
+  (login accounts), and `OfflineSale` (Stage 11, optional module).
+  - `Product.js` — `productID` (format `#0000`, regex-enforced, unique),
+    `sellingPriceHistory`/`buyingPriceHistory` (arrays of `{price, date}` —
+    a price *history*, not a scalar — see `lib/pricing.js`'s
+    `getLatestSellingPrice`/`getLatestBuyingPrice`), `quantity`,
+    `reserved` (Stage 3 — units held by in-progress carts, not yet
+    committed), `lowStockThreshold`.
+  - `Order.js` — `orderID` (`#0000`), `customerName`, `products` (embedded
+    `{productID, quantity, amount, discount, discountType,
+    discountAmount}`), `cashier`, `totalAmount`, `amountPaid`,
+    `balanceDue`, `paymentStatus`, `payments[]`, `editHistory[]` (Stage 7).
+- **`routes/`** — `auth.js` (login/JWT), `export.js` (Stage 10, CSV
+  export), `sync.js` (Stage 11, offline sync). Everything else — including
+  order edit/refund (`POST /api/order/:orderID/edit`,
+  `POST /api/order/:orderID/refund`) — is still inline in `main.js`.
+- **`lib/`** — shared logic: `pricing.js`, `money.js` (rounding),
+  `validators.js`, `query.js` (pagination/sort helpers), `errors.js`
+  (`AppError`), `reports.js` (Stage 9/10 dashboard + export aggregation),
+  `csv.js` (dependency-free CSV writer), `offlineSync.js` (Stage 11 offline
+  commit logic).
+- **`frontend/`** — the entire UI. React (Vite, Tailwind via
+  `@tailwindcss/vite`, no CDN), React Router for client-side routing. Talks
+  to the backend over JSON only, via `frontend/src/lib/api.js` — every
+  backend call goes through that one file. See `frontend/README.md`.
+- **`middleware/`** — `auth.js` (`requireAuth`/`requireAdmin`, JWT),
+  `errorHandler.js` (`asyncHandler` wrapper + centralized error middleware).
 
-### Data flow pattern
+### How a request is served
 
-Each page route (`GET /billing`, `GET /product`, `GET /customer`, `GET /dashboard`) does a server-side Mongoose fetch and renders an EJS template with the data. Mutations (add/edit/delete product or customer, save an order) go through separate `POST`/`DELETE` JSON API routes that the page's inline `<script>` calls via `fetch()`, then the script updates the DOM or reloads — there's no client-side routing or state management library.
+1. `/auth/*` → `routes/auth.js`.
+2. `/api/export/*`, `/api/sync/*` → optional modules (Stage 10/11), each
+   behind its own `.env` flag (`ENABLE_EXPORTS`, `ENABLE_OFFLINE_SYNC`),
+   mounted with one line each in `main.js`.
+3. Everything else under `/api`, `/billing`, `/product`, `/customer`,
+   `/supplier`, `/dashboard/load` → inline route handlers in `main.js`,
+   JSON in and out. (See `progress.md`'s Route Inventory for the full
+   list.)
+4. Any GET request that didn't match one of the above and isn't under
+   `/api` or `/auth` → served `frontend/dist/index.html` (or a static
+   asset from `frontend/dist` if the path matches one). React Router picks
+   the screen from there. An unmatched `/api/*` or `/auth/*` request 404s
+   as JSON instead of falling through to the SPA shell — see the block
+   right before `app.use(errorHandler)` in `main.js`.
+
+If `frontend/dist` doesn't exist (frontend never built), the API still
+works; `main.js` logs a warning at boot and there's just no UI to serve.
 
 ### Notable implementation details / quirks to be aware of
 
-- **No authentication**: `POST /dashboard`... actually `GET /dashboard` just reads `?username=` from the query string and renders it — login does not check credentials against a database at all; any username/password logged in via the form is accepted and just passed through as a query param on redirect.
-- **IDs are business identifiers, not Mongo `_id`s**: products and orders use a human-facing `#0000`-style ID (regex `^#\d{4}$`) as the real lookup key throughout the app (`Product.findOne({ productID })`, etc.).
-- **"Restock" via re-submitting the add-product form**: `POST /product` checks whether a `productID` already exists — if so it *adds* the submitted stock to existing stock rather than creating a duplicate; only creates a new product doc if the ID is new.
-- **Undo pattern**: delete routes (`/product/:productID`, customer delete) just delete; the corresponding `/product/undo` and `/customer/undoCustomer` POST routes exist so the frontend can show an "undo" toast and re-insert the same data if the user clicks it within a time window. This restore logic lives client-side in the EJS `<script>` blocks, not as a server-side soft-delete/trash mechanism.
-- **`unitPrice` is an array**, not a scalar — code reads current price as `unitPrice.price` in some places, which likely refers to `unitPrice[unitPrice.length - 1].price` conceptually but should be checked carefully when touching pricing logic, since Mongoose projections like `"unitPrice.price"` return the whole array of price objects.
-- **Customer linkage on order save** (`POST /billing/orderDetails`): saves the `Order` doc, then separately does `Customer.updateOne({customerName}, {$push: {orders: {...}}})` — these two writes are not wrapped in a transaction, so a crash between them can leave an order that isn't referenced from the customer record.
-- **Mixed languages/comments**: some inline comments are in Roman Urdu/English mix (e.g. `// 🔥 JSON handle karne ke liye`) — this is a solo/small-team project without a strict style guide; match the existing tone if editing nearby code rather than imposing a different convention.
-- **Hardcoded config**: `MONGO_URI` and `port` fallback are hardcoded in `main.js` rather than pulled from a `.env` file — if adding config, consider introducing `dotenv` rather than continuing to hardcode, but check with the user first since this is a deliberate simplicity choice in a small project.
+- **IDs are business identifiers, not Mongo `_id`s**: products and orders
+  use a human-facing `#0000`-style ID (regex `^#\d{4}$`) as the real lookup
+  key throughout (`Product.findOne({ productID })`, etc.).
+- **Reservation before commit (Stage 3)**: adding an item to a cart calls
+  `POST /billing/reserve`, which atomically increments `Product.reserved`
+  — this is what prevents two cashiers from overselling the same last
+  unit, not a check-then-write from the client. `POST /billing/release`
+  undoes it (cancel, remove item, tab closed — see the `beforeunload`
+  handler in `Billing.jsx` and the abandoned-draft sweep in `main.js`).
+- **Drafts are the server's source of truth for checkout (Stage 4)**: the
+  cashier's in-progress cart is autosaved server-side as a `PendingBill`.
+  `POST /billing/orderDetails` (commit) reads *that*, not anything sent in
+  the request body — re-verifying price/discount against current DB values
+  before committing stock and creating the `Order`.
+- **Price is a history array, not a scalar** — always read it via
+  `getLatestSellingPrice(product)` / `getLatestBuyingPrice(product)`
+  (`lib/pricing.js`), never `product.sellingPriceHistory[0].price` or
+  similar.
+- **Money rounding**: use `roundMoney()` (`lib/money.js`) on every
+  computed amount before storing or comparing — floating-point drift
+  across many small discounts/payments is the usual source of "off by a
+  cent" bugs here.
+- **Two independent feature-flagged modules (Stage 10/11)**: CSV export
+  (`ENABLE_EXPORTS`, default on) and offline sync (`ENABLE_OFFLINE_SYNC`,
+  default off, plus `VITE_ENABLE_OFFLINE_SYNC` on the frontend — both must
+  agree). Both are designed to be deletable — their own files plus one
+  `require` + one mount line in `main.js` each — without touching the core
+  billing flow. See `progress.md` for what's in each.
+- **Offline sync's commit path is intentionally separate** from
+  `/billing/orderDetails`'s transaction (`lib/offlineSync.js`, not a
+  shared function) — an offline sale has no server-held `PendingBill` to
+  source items from and was never reserved, so it re-checks current stock
+  availability directly at sync time instead of consuming a reservation.
+  See that file's header comment before changing either commit path.
+- **Mixed languages/comments**: some inline comments are in Roman
+  Urdu/English mix — this is a solo/small-team project without a strict
+  style guide; match the existing tone if editing nearby code.
 
-## Frontend migration (React + Vite + Tailwind) — in progress
+## History
 
-The UI is being rebuilt page by page as a React app in **`/frontend`**,
-replacing the EJS views one screen at a time. This section is the source of
-truth for that migration and gets updated at the end of every stage — read
-it before making further frontend changes.
+The app started as a monolithic Express + EJS server-rendered app (no
+build step, no frontend framework — `views/*.ejs` with inline `<script>`
+blocks for interactivity, no authentication, hardcoded Mongo URI). It was
+rebuilt in phases:
 
-### Structure
+1. **Frontend migration kickoff** — `frontend/` scaffolded (Vite + React +
+   Tailwind), all EJS screens ported to React, two JSON endpoints added
+   for what the EJS routes had been fetching server-side.
+2. **Spec Stages 1–9** (see `progress.md` for the full per-stage log)
+   hardened the backend: auth, validation, atomic stock reservation,
+   draft-bill persistence, customer/supplier credit, discounts, admin
+   edit/refund, search/sort/pagination, dashboard reporting — all built
+   against the same JSON API the React frontend already used.
+3. **Spec Stages 10–11** added two optional, feature-flagged modules (CSV
+   export, offline sync) on top of the now-stable core.
+4. **EJS removal**: once the React frontend covered every screen, `views/`,
+   the EJS `view engine` setup, the `public/css` + `src/input.css`
+   Tailwind-CDN-era assets, and every `res.render(...)` route were
+   deleted. `main.js` now serves `frontend/dist` directly (see "How a
+   request is served" above) instead of running two parallel UIs. This is
+   a one-way change — there is no EJS fallback anymore, so the frontend
+   must be built (`npm run build-frontend`) before deploying `main.js`
+   anywhere the UI needs to be reachable.
 
-- **`/frontend`** — new React app (Vite, Tailwind via `@tailwindcss/vite`
-  package, no CDN). Talks to the existing Express backend over JSON only;
-  it never touches MongoDB directly. See `frontend/README.md` for the
-  detailed layout and run instructions.
-  - `frontend/src/pages/` — one component per screen (`Login`, `Dashboard`,
-    `Billing`, `Products`, `Customers`) — mirrors `views/*.ejs` 1:1 by name.
-  - `frontend/src/components/` — `Sidebar`, `Topbar`, `ProtectedRoute`
-    (shared chrome, was `sidebar.ejs` + inline header markup per page).
-  - `frontend/src/lib/api.js` — **every** backend call goes through here.
-    When adding a new API interaction, add it here rather than calling
-    `fetch` directly from a component.
-  - `frontend/src/lib/AuthContext.jsx` — client-side session (username in
-    `sessionStorage`). No real credential check exists yet on the backend
-    either, so this intentionally mirrors that (see "No authentication"
-    below) — don't add fake client-side validation that implies otherwise.
-- **`main.js` / `models/` / `views/`** — unchanged and still fully
-  functional as the original server-rendered app. Left in place
-  intentionally as a working reference while the migration is in progress;
-  do not delete until the whole frontend has been migrated and the person
-  confirms it's safe to remove.
-- **`public/css`, `src/input.css`, root `package.json`'s `build`/`watch`
-  scripts** — belong to the old EJS/Tailwind-CDN setup. Not used by
-  `/frontend`, which has its own Tailwind pipeline.
-
-### Backend additions made to support the React app
-
-Two JSON endpoints were added to `main.js`, additive only — nothing
-existing was removed or changed:
-- `GET /api/products`, `GET /api/customers` — JSON list data (the EJS
-  routes fetched this server-side; React needs it as JSON).
-- `POST /api/product` — same add/restock logic as `POST /product`, but
-  responds with JSON instead of a redirect (that route is shaped for an
-  HTML form submit).
-
-Everything else the frontend calls (`/billing/*`, `/customer/*`,
-`/product/undo`, `DELETE /product/:id`) already returned JSON and is reused
-unchanged.
-
-### UI/UX fixes applied during this stage (kept intentionally small)
-
-- Sidebar's dead `href=""` links (Reports/Workers/Suppliers/Webpage) are
-  now visibly disabled instead of silently doing nothing.
-- Header avatar no longer depends on `via.placeholder.com` (was liable to
-  break with no network) — replaced with a initials badge.
-- Empty dashboard tables now show a "no data" row instead of staying blank.
-- Product/Customer "select row → edit" is a plain click-to-edit instead of
-  the original's checkbox + two-hidden-forms + broken `openDelete()`
-  no-op — same backend calls, fewer moving parts.
-- Colors that were hardcoded as `bg-[#065b8a]` etc. throughout the EJS
-  views are now Tailwind theme tokens (`bg-brand`, `text-brand-green`, …)
-  defined once in `frontend/src/index.css`.
-
-No behavior beyond the above was intentionally changed — anything else
-that looks different from the EJS version is a bug, not a redesign.
-
-### Stage log
-
-| Stage | Date | What changed |
-|---|---|---|
-| 1 | 2026-08-10 | Scaffolded `/frontend` (Vite + React + Tailwind package, no CDN). Ported all 5 screens (Login, Dashboard, Billing, Products, Customers) to React, wired to the existing backend via 2 new JSON endpoints. No visual redesign — same layout/colors/copy as the EJS views, only the flaws listed above fixed. |
-
-When a new stage lands, append a row here (don't rewrite history) and
-update any section above that's now stale.
+`progress.md` has the detailed, stage-by-stage log (what changed, what was
+verified, known gaps) — read it before making further backend changes.
+`frontend/README.md` has the frontend-specific structure and run
+instructions.
 
 ## Working in this codebase
 
-- Routes, models, and views are all fairly small — when adding a feature, prefer following the existing pattern (inline route handler in `main.js`, Mongoose model in `models/`, EJS view with inline `<script>`) over introducing new architectural layers (routers, controllers, a frontend build pipeline) unless asked.
-- When editing anything touching prices or stock quantities, double-check the `unitPrice` array-of-history shape in `Product.js` and the `isNaN(parseInt(...))`-guarded parsing pattern used throughout `main.js` for numeric form fields — replicate that defensive parsing rather than assuming clean input.
-- When editing a view's client-side script, remember the Tailwind CDN vs compiled-CSS inconsistency above — check which one a given page uses before assuming Tailwind classes will pick up custom config from `src/input.css`.
-- There's no test suite, so verify changes by running the app against a local MongoDB instance and exercising the relevant page/route manually.
+- When adding a backend feature, prefer an inline route handler in
+  `main.js` following the existing pattern, unless it's substantial enough
+  to warrant its own `routes/*.js` file (the way `export.js`/`sync.js`
+  are) — in which case mount it explicitly and note the mount line.
+- When touching prices or stock quantities, use `lib/pricing.js` and
+  `lib/money.js` rather than reading/rounding inline — see "Notable
+  implementation details" above.
+- When adding a frontend screen or API call, put the API call in
+  `frontend/src/lib/api.js`, not `fetch()` directly in a component. If it
+  adds a new backend path prefix, add it to `frontend/vite.config.js`'s
+  dev proxy list too, or it'll silently 404 in `npm run dev`.
+- There's no test suite — verify changes by running the app against a
+  local MongoDB replica set and exercising the relevant screen/route
+  manually. `frontend/dist` must be rebuilt (`npm run build-frontend`) to
+  see backend-adjacent frontend changes reflected when running via
+  `main.js` directly (the Vite dev server on :5173 doesn't need this — it
+  serves source directly and proxies API calls).

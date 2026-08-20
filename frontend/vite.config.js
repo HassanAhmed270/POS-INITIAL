@@ -8,14 +8,17 @@ export default defineConfig({
   server: {
     port: 5173,
     // Forward every JSON/API-style call to the Express backend (main.js) on :3000.
-    // The old EJS page routes stay on the backend for reference; the React app only
-    // talks to the JSON endpoints listed below (see CLAUDE.md "API surface").
+    // The backend is API-only now (see progress.md "EJS removal") — this dev
+    // server is the only UI. In production, `npm run build-frontend` (root
+    // package.json) builds this into frontend/dist, which main.js serves
+    // directly, so there's no separate frontend deployment needed.
     proxy: {
       '/auth': 'http://localhost:3000',
       '/api': 'http://localhost:3000',
       '/product': 'http://localhost:3000',
       '/customer': 'http://localhost:3000',
       '/billing': 'http://localhost:3000',
+      '/supplier': 'http://localhost:3000',
       '/dashboard/load': 'http://localhost:3000',
     },
   },

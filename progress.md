@@ -5,8 +5,9 @@ Companion to `CLAUDE.md`, which contains full narrative detail per stage.
 Fast-reference version: what exists, where, and what remains open.
 
 Repo root: `POS-INITIAL/`. Backend: Express + Mongoose at root (`main.js`).
-Frontend: React + Vite + Tailwind in `frontend/`.
-Legacy EJS views are reference-only and are not maintained.
+Frontend: React + Vite + Tailwind in `frontend/`. There is no
+server-rendered UI — the legacy EJS views were removed once the React
+frontend covered every screen; see "EJS removal" below.
 
 ## Stage 1 — Frontend migration kickoff
 
@@ -162,7 +163,50 @@ Legacy EJS views are reference-only and are not maintained.
 - Large queues, prolonged outages and multi-device stress scenarios are not
   yet stress-tested.
 
-## Route Inventory — End of Stage 11
+## EJS removal — MERN-only
+
+Not a numbered spec stage; a cleanup pass once the React frontend covered
+every screen and Stage 10/11 had landed. Requested directly: no more
+server-rendered UI, single Express + React deployment.
+
+- Deleted `views/` (all EJS templates), `public/css`, `src/input.css`,
+  root `output.css` — the entire EJS-era Tailwind pipeline.
+- Removed from `main.js`: `view engine` setup, all six `res.render(...)`
+  page routes (`/`, `/logout`, `/dashboard`, `/billing`, `/product`,
+  `/customer`), and the dead `POST /product` form-submit route (`POST
+  /api/product` already covered the same logic and was the only one the
+  React app ever called).
+- `main.js` now serves `frontend/dist` directly: static assets served,
+  any unmatched GET outside `/api`/`/auth` gets `index.html` (React Router
+  decides the screen), an unmatched `/api/*` or `/auth/*` 404s as JSON
+  rather than falling through to the SPA shell. If `frontend/dist` isn't
+  built yet, the API still works — `main.js` just logs a warning at boot.
+- `package.json`: removed `ejs` and the root `tailwindcss` devDependency
+  (frontend has its own); added `build-frontend` script.
+- Fixed a pre-existing dev-proxy gap while touching `vite.config.js`:
+  `/supplier` was missing from the proxy list, so `deleteSupplier`/
+  `recordPurchase` silently 404'd under `npm run dev` (worked fine once
+  built and served by `main.js`, since same-origin has no proxy to miss).
+- Rewrote `CLAUDE.md` (had been stale since before Spec Stage 1 — still
+  described "no authentication" and a scalar `unitPrice`) and
+  `frontend/README.md` (still described the EJS-parity migration stage)
+  to match current reality.
+- Verified: full boot test with both `.env` flags on — `/` and every
+  client-side route (`/billing`, `/orders`, `/suppliers`, `/reports`) →
+  200 (SPA shell); static asset → 200; `/api/export/*`, `/api/sync/*`,
+  `/api/order/:id/edit` → 401 (real routes, correctly auth-gated);
+  `/api/nonsense` → clean JSON 404. Frontend builds clean via `vite
+  build`. Re-verified against the actual current `origin/main` (not a
+  stale local clone) after discovering two upstream commits had already
+  landed (Stage 10/11 patch applied, plus an unrelated fix moving order
+  edit/refund routes to `/api/order/*` — the EJS-removal 404 guard
+  benefits from that move, since it keeps everything under `/api` cleanly
+  JSON-only).
+- This is one-way: there is no EJS fallback anymore. Deploying `main.js`
+  anywhere the UI needs to be reachable now requires `npm run
+  build-frontend` first.
+
+## Route Inventory — End of Stage 11 / EJS removal / EJS removal
 
 **Public**
 - `POST /auth/login`
@@ -182,10 +226,17 @@ Legacy EJS views are reference-only and are not maintained.
 
 **Authenticated + Admin**
 - `POST /billing/update`
-- `POST /order/:orderID/edit`
-- `POST /order/:orderID/refund`
+- `POST /api/order/:orderID/edit`
+- `POST /api/order/:orderID/refund`
 - `GET /api/sync/conflicts`
 - `POST /api/sync/conflicts/:id/resolve`
+
+**Frontend (all other GET requests)**
+- Any unmatched GET not under `/api` or `/auth` serves
+  `frontend/dist/index.html`; React Router owns everything from there
+  (`/`, `/dashboard`, `/billing`, `/products`, `/customers`, `/suppliers`,
+  `/orders`, `/reports`). An unmatched `/api/*` or `/auth/*` request 404s
+  as JSON instead.
 
 List routes support:
 `search`, `sortBy`, `sortDir`, `page`, `limit`.
@@ -199,13 +250,13 @@ Exports:
 ## Current Known Cross-Cutting Gaps
 
 1. Some read routes remain public/auth-only.
-2. Legacy EJS application remains broken/reference-only.
-3. No refresh-token flow.
-4. Billing receipt/cart does not display stored `discountAmount`.
-5. Refund cash-back vs store-credit is not distinguished.
-6. Stage 8 sort allow-list, fielded search and URL state remain absent.
-7. Dashboard refund count/amount use different date scopes.
-8. Offline sync has not been stress-tested at scale.
+2. No refresh-token flow.
+3. Billing receipt/cart does not display stored `discountAmount`.
+4. Refund cash-back vs store-credit is not distinguished.
+5. Stage 8 sort allow-list, fielded search and URL state remain absent.
+6. Dashboard refund count/amount use different date scopes.
+7. Offline sync has not been stress-tested at scale (large queues,
+   prolonged outages, many devices).
 
 ## Current Status
 
@@ -214,6 +265,9 @@ Stages 1–10 are implemented and verified.
 Stage 11 is implemented and **end-to-end verified in the real browser and
 database**, including offline sale creation, durable queueing, automatic
 reconnection sync, conflict detection and conflict resolution.
+
+EJS removal is complete and verified: the app is single-deployment MERN
+(`main.js` serves `frontend/dist`), no server-rendered UI remains.
 
 No unresolved functional issue was found in the primary Stage 11 flow.
 

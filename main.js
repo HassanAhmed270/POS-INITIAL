@@ -4,6 +4,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const pinoHttp = require('pino-http');
 const path = require('path');
+const fs = require('fs');
 
 const Product = require('./models/Product');
 const Order = require('./models/Order');
@@ -45,7 +46,6 @@ const DRAFT_SWEEP_INTERVAL_MS = parseInt(process.env.DRAFT_SWEEP_INTERVAL_MS) ||
 const ORDER_EDIT_WINDOW_MS = 72 * 60 * 60 * 1000; // 72 hours
 
 // ── Core middleware ─────────────────────────────────────────
-app.use(express.static('public'));
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(pinoHttp({ logger, autoLogging: { ignore: (req) => req.url === '/dashboard/load' } }));
@@ -69,9 +69,6 @@ mongoose
     }
   })
   .catch((err) => logger.error({ err: err.message }, 'MongoDB connection failed'));
-
-app.set('view engine', 'ejs');
-app.set('views', path.join(__dirname, 'views'));
 
 // Defaults to 10 (matches the Product schema default) for missing/invalid input.
 function parseThreshold(value) {
@@ -102,34 +99,6 @@ if (process.env.ENABLE_OFFLINE_SYNC === 'true') {
 } else {
   logger.info('Offline sync module disabled (set ENABLE_OFFLINE_SYNC=true to enable)');
 }
-
-// ── Legacy EJS pages (untouched; kept as a working reference
-//    while the React frontend migration is in progress) ──────
-app.get('/logout', (req, res) => {
-  res.render('login');
-});
-app.get('/', (req, res) => {
-  res.render('login');
-});
-app.get('/dashboard', (req, res) => {
-  const username = req.query.username;
-  res.render('dashboard', { username });
-});
-app.get('/billing', asyncHandler(async (req, res) => {
-  const username = req.query.username;
-  const customer = await Customer.find({});
-  const data = await Product.find({}, 'productID productName category sellingPriceHistory.price quantity supplier');
-  res.render('billing', { username, products: data, customers: customer.map((c) => c.customerName) });
-}));
-app.get('/product', asyncHandler(async (req, res) => {
-  const data = await Product.find({}, 'productID productName category sellingPriceHistory.price quantity supplier');
-  res.render('product', { products: data });
-}));
-app.get('/customer', asyncHandler(async (req, res) => {
-  const username = req.query.username;
-  const data = await Customer.find({}, 'customerName mobileNo emergencyMobile email address');
-  res.render('customer', { customers: data, username });
-}));
 
 // ── JSON read API for the React frontend (public — see CLAUDE.md) ──
 // Stage 9's aggregation now lives in lib/reports.js (getDashboardSummary)
@@ -262,39 +231,6 @@ app.post('/api/product', requireAuth, asyncHandler(async (req, res) => {
   }
 
   res.status(200).json({ success: true, message: 'Product saved successfully' });
-}));
-
-// Legacy HTML form-submit route. Now behind requireAuth like every other
-// mutating route — the old plain <form method="post"> in views/product.ejs
-// can't attach a Bearer token, so this route is effectively retired in
-// favor of POST /api/product. Left in place only for reference.
-app.post('/product', requireAuth, asyncHandler(async (req, res) => {
-  const { productId, productName, category, price, stock, supplier, already } = req.body;
-  const existingProduct = await Product.findOne({ productID: productId });
-
-  if (existingProduct) {
-    const updatedStock =
-      (isNaN(parseInt(stock)) ? 0 : parseInt(stock)) + (isNaN(parseInt(already)) ? 0 : parseInt(already));
-    existingProduct.quantity = updatedStock;
-    const latestPrice = roundMoney(getLatestSellingPrice(existingProduct));
-    const submittedPrice = roundMoney(price);
-    if (submittedPrice > 0 && submittedPrice !== latestPrice) {
-      existingProduct.sellingPriceHistory.push({ price: submittedPrice, date: new Date() });
-    }
-    await existingProduct.save();
-  } else {
-    const newProduct = new Product({
-      productID: productId,
-      productName,
-      category,
-      sellingPriceHistory: [{ price: roundMoney(price) }],
-      quantity: isNaN(parseInt(stock)) ? 0 : parseInt(stock),
-      supplier: supplier || 'N/A',
-    });
-    await newProduct.save();
-  }
-
-  res.redirect('/product');
 }));
 
 app.delete('/product/:productID', requireAuth, asyncHandler(async (req, res) => {
@@ -1192,6 +1128,31 @@ app.post('/api/order/:orderID/refund', requireAuth, requireAdmin, asyncHandler(a
 
   res.status(200).json({ success: true, message: 'Refund processed.', refund, order: updatedOrder });
 }));
+
+// ── Serve the built React frontend (MERN — no server-rendered
+//    views anymore; see progress.md "EJS removal") ──────────────
+// Registered last, after every real API route, so an unmatched
+// /api/* or /auth/* request still 404s as JSON (a typo'd API call
+// failing loudly beats it silently getting back an HTML page), while
+// every other unmatched GET — the client-side routes React Router
+// owns, like /billing or /orders/123 — gets the SPA shell and lets
+// the frontend decide what to render.
+app.use(['/api', '/auth'], (req, res) => {
+  res.status(404).json({ success: false, message: 'Not found.' });
+});
+
+const frontendDist = path.join(__dirname, 'frontend', 'dist');
+if (fs.existsSync(path.join(frontendDist, 'index.html'))) {
+  app.use(express.static(frontendDist));
+  app.get(/.*/, (req, res) => {
+    res.sendFile(path.join(frontendDist, 'index.html'));
+  });
+} else {
+  logger.warn(
+    'frontend/dist not found — run `npm run build` inside /frontend to serve the React app from this server. ' +
+      'API routes still work; only the UI is unavailable until it is built.'
+  );
+}
 
 // ── Centralized error handler — must be registered last ─────
 app.use(errorHandler);
