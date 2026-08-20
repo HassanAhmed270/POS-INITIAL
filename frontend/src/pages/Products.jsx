@@ -6,11 +6,13 @@ import Pagination from '../components/Pagination';
 import { api } from '../lib/api';
 import { formatMoney } from '../lib/money';
 import { useDebouncedValue } from '../lib/useDebouncedValue';
+import { useAuth } from '../lib/AuthContext';
 
 const emptyForm = { productId: '', productName: '', category: '', price: '', stock: '', supplier: '', lowStockThreshold: '' };
 const PAGE_SIZE = 10;
 
 export default function Products() {
+  const { isAdmin } = useAuth();
   const [products, setProducts] = useState([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -26,6 +28,11 @@ export default function Products() {
   const [mode, setMode] = useState('add'); // 'add' | 'update'
   const [form, setForm] = useState(emptyForm);
   const [already, setAlready] = useState(0);
+  // Previous selling price for the product currently being edited (Stage
+  // 13, admin-only) — shown next to the new-price input so an admin can
+  // see what it was vs. what they're about to set it to. null in 'add'
+  // mode since there's no previous price yet.
+  const [previousPrice, setPreviousPrice] = useState(null);
   const [undoStack, setUndoStack] = useState([]);
   const [showUndo, setShowUndo] = useState(false);
 
@@ -67,6 +74,7 @@ export default function Products() {
   const resetForm = () => {
     setForm(emptyForm);
     setAlready(0);
+    setPreviousPrice(null);
     setMode('add');
     setSelectedId(null);
   };
@@ -84,6 +92,7 @@ export default function Products() {
       lowStockThreshold: p.lowStockThreshold ?? 10,
     });
     setAlready(p.quantity);
+    setPreviousPrice(p.price ?? null);
   };
 
   const handleSubmit = async (e) => {
@@ -246,6 +255,11 @@ export default function Products() {
                   </div>
                   <div>
                     <label className="block mb-1 font-medium">Price</label>
+                    {isAdmin && mode === 'update' && (
+                      <p className="text-xs text-gray-500 mb-1">
+                        Previous: <span className="font-medium text-gray-700">{formatMoney(previousPrice ?? 0)}</span>
+                      </p>
+                    )}
                     <input
                       type="number"
                       step="0.01"

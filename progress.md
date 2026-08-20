@@ -266,9 +266,9 @@ Exports:
 
 ## Current Status
 
-Stages 1–10 and Stage 12 are implemented and verified (Stage 12's
-DB-touching paths syntax/logic-verified only — see its Verification
-section; no live MongoDB in this sandbox).
+Stages 1–10, 12, and 13 are implemented and verified (Stage 12/13's
+DB-touching or live-browser paths are syntax/logic-verified only — see
+each Verification section; no live MongoDB in this sandbox).
 
 Stage 11 is implemented and **end-to-end verified in the real browser and
 database**, including offline sale creation, durable queueing, automatic
@@ -326,6 +326,44 @@ and stress-testing unless the next specification adds new functionality.
   firing against a real backend session.
 - Frontend: `npm run build` succeeds with the `AuthContext.jsx`/`api.js`
   changes.
+
+## Spec Stage 13 — Product Price Edit: Show Previous vs. New Amount (Admin-only)
+
+- Products edit form: when an admin opens a product to update it, a
+  "Previous: <amount>" line now appears above the Price input, showing
+  the price that was in effect before this edit (`p.price`, i.e. the
+  latest `sellingPriceHistory` entry, captured at the moment the row is
+  selected via `handleSelectForUpdate`). The editable input itself is
+  unaffected — this is a read-only reference line alongside it.
+- Suppliers purchase-recording form: same treatment for buying price —
+  once a product is picked from the dropdown, a "Previous: <amount>"
+  line shows that product's latest `costPrice` (from `GET /api/products`,
+  already fetched into `allProducts` for the dropdown) above the Unit
+  Cost input.
+- Both are gated on `isAdmin` from `AuthContext` (same pattern as
+  `Orders.jsx`'s admin-only edit/refund buttons) — cashiers see the forms
+  exactly as before, no previous-price line.
+- No backend changes: `p.price`/`p.costPrice` were already present in the
+  `GET /api/products` response (Stage 5's `lib/pricing.js` latest-history
+  helpers); this was purely a UI gap, as scoped.
+- Known simplification: a product with no purchase history yet shows
+  "Previous: Rs 0.00" (Suppliers form) rather than a distinct "no prior
+  purchase" message — `getLatestBuyingPrice()` already returns 0 for an
+  empty history everywhere else in the app (e.g. Products list's cost
+  column), so this stays consistent with that existing convention instead
+  of introducing a new backend field just to distinguish the two cases.
+
+### Stage 13 Verification
+
+- Frontend `npm run build` succeeds.
+- `npm run lint` (oxlint) passes — 0 errors; the one pre-existing warning
+  in `AuthContext.jsx` (fast-refresh export shape) predates this change
+  and isn't in either file touched here.
+- Not verified: not exercised in a live browser against a real backend/DB
+  in this sandbox (same limitation as Stage 12 — no MongoDB replica set
+  available here). Logic was traced by hand against the actual
+  `GET /api/products` response shape (`price`, `costPrice` fields
+  confirmed present in `main.js`) rather than observed live.
 
 ## Stage Numbering Note
 

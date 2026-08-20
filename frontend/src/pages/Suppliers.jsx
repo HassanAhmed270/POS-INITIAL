@@ -6,12 +6,14 @@ import Pagination from '../components/Pagination';
 import { api } from '../lib/api';
 import { formatMoney } from '../lib/money';
 import { useDebouncedValue } from '../lib/useDebouncedValue';
+import { useAuth } from '../lib/AuthContext';
 
 const emptySupplierForm = { supplierName: '', contactPerson: '', phone: '', email: '', address: '' };
 const emptyPurchaseForm = { supplierName: '', productId: '', quantity: '', unitCost: '', amountPaid: '' };
 const PAGE_SIZE = 10;
 
 export default function Suppliers() {
+  const { isAdmin } = useAuth();
   const [suppliers, setSuppliers] = useState([]);
   const [total, setTotal] = useState(0);
   // Full, unpaginated lists — used only to populate the dropdowns below,
@@ -33,6 +35,14 @@ export default function Suppliers() {
 
   const [supplierForm, setSupplierForm] = useState(emptySupplierForm);
   const [purchaseForm, setPurchaseForm] = useState(emptyPurchaseForm);
+
+  // Stage 13, admin-only: previous buying price for whichever product is
+  // currently selected in the purchase form, so an admin can see what was
+  // paid last time next to the new unit-cost input. Derived rather than
+  // stored — allProducts already carries costPrice (latest
+  // buyingPriceHistory entry) from GET /api/products.
+  const selectedPurchaseProduct = allProducts.find((p) => p.productID === purchaseForm.productId);
+  const previousBuyingPrice = selectedPurchaseProduct?.costPrice ?? null;
 
   const loadSuppliers = async () => {
     setLoading(true);
@@ -323,6 +333,11 @@ export default function Suppliers() {
               </div>
               <div>
                 <label className="block mb-1 font-medium">Unit Cost</label>
+                {isAdmin && purchaseForm.productId && (
+                  <p className="text-xs text-gray-500 mb-1">
+                    Previous: <span className="font-medium text-gray-700">{formatMoney(previousBuyingPrice ?? 0)}</span>
+                  </p>
+                )}
                 <input
                   type="number"
                   step="0.01"
