@@ -53,7 +53,7 @@ export const api = {
   releaseStock: (productId, quantity) => request('/billing/release', { method: 'POST', body: JSON.stringify({ productId, quantity }) }),
 
   // Customers
-getCustomers: (params = {}) => request(`/api/customers?${new URLSearchParams(params)}`),
+  getCustomers: (params = {}) => request(`/api/customers?${new URLSearchParams(params)}`),
   addCustomer: (payload) => request('/billing/addCustomer', { method: 'POST', body: JSON.stringify(payload) }),
   updateCustomer: (payload) => request('/customer/updateCustomer', { method: 'POST', body: JSON.stringify(payload) }),
   deleteCustomer: (customerName) => request('/customer/deleteCustomer', { method: 'POST', body: JSON.stringify({ customerName }) }),
@@ -80,7 +80,7 @@ getCustomers: (params = {}) => request(`/api/customers?${new URLSearchParams(par
     }),
 
   // Dashboard
- getDashboard: (range = 'month') => request(`/dashboard/load?range=${encodeURIComponent(range)}`),
+  getDashboard: (range = 'month') => request(`/dashboard/load?range=${encodeURIComponent(range)}`),
 
   // Exports (Stage 10) — these return CSV, not JSON, so they bypass the
   // shared `request()` helper (which assumes JSON/text-parsed bodies) and
@@ -115,14 +115,21 @@ getCustomers: (params = {}) => request(`/api/customers?${new URLSearchParams(par
   },
 
   // Suppliers (Stage 5)
-getSuppliers: (params = {}) => request(`/api/suppliers?${new URLSearchParams(params)}`),
+  getSuppliers: (params = {}) => request(`/api/suppliers?${new URLSearchParams(params)}`),
   saveSupplier: (payload) => request('/api/supplier', { method: 'POST', body: JSON.stringify(payload) }),
   deleteSupplier: (supplierName) => request(`/supplier/${encodeURIComponent(supplierName)}`, { method: 'DELETE' }),
   recordPurchase: (payload) => request('/supplier/purchase', { method: 'POST', body: JSON.stringify(payload) }),
 
   // Orders, admin edit & refund (Stage 7)
-getOrders: (params = {}) => request(`/api/orders?${new URLSearchParams(params)}`),
+  getOrders: (params = {}) => request(`/api/orders?${new URLSearchParams(params)}`),
   getOrder: (orderID) => request(`/api/orders/${encodeURIComponent(orderID)}`),
-  editOrderItem: (orderID, payload) => request(`/order/${encodeURIComponent(orderID)}/edit`, { method: 'POST', body: JSON.stringify(payload) }),
-  refundOrder: (orderID, payload) => request(`/order/${encodeURIComponent(orderID)}/refund`, { method: 'POST', body: JSON.stringify(payload) }),
+ editOrderItem: (orderID, payload) =>
+  request(`/api/order/${encodeURIComponent(orderID)}/edit`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }), refundOrder: (orderID, payload) =>
+    request(`/api/order/${encodeURIComponent(orderID)}/refund`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
 };

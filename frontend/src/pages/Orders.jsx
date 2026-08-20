@@ -139,7 +139,17 @@ export default function Orders() {
     if (!confirm(`Refund ${items.length} item(s) on ${expandedID}? This marks the whole order as refunded.`)) return;
 
     try {
-      const data = await api.refundOrder(expandedID, { items, reason: refundReason.trim() });
+      const data = await api.refundOrder(expandedID, {
+        items,
+        reason: refundReason.trim(),
+      });
+
+      console.log('REFUND RESPONSE:', data);
+
+      if (!data?.success || !data?.refund) {
+        throw new Error(data?.message || 'Refund completed but no refund details were returned.');
+      }
+
       alert(`Refund processed: ${formatMoney(data.refund.refundAmount)}`);
       setRefundForm({});
       setRefundReason('');

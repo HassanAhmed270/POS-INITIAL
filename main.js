@@ -1050,7 +1050,7 @@ async function applyLineReduction(order, productID, newQty, reason, action, edit
   return restoreQty;
 }
 
-app.post('/order/:orderID/edit', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+app.post('/api/order/:orderID/edit', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
   const { productID, newQty, reason } = req.body;
   const { orderID } = req.params;
 
@@ -1104,7 +1104,7 @@ app.post('/order/:orderID/edit', requireAuth, requireAdmin, asyncHandler(async (
   res.status(200).json({ success: true, message: 'Order updated.', order: updatedOrder });
 }));
 
-app.post('/order/:orderID/refund', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+app.post('/api/order/:orderID/refund', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
   const { items, reason } = req.body;
   const { orderID } = req.params;
 
