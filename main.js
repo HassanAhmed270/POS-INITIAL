@@ -100,17 +100,20 @@ if (process.env.ENABLE_OFFLINE_SYNC === 'true') {
   logger.info('Offline sync module disabled (set ENABLE_OFFLINE_SYNC=true to enable)');
 }
 
-// ── JSON read API for the React frontend (public — see CLAUDE.md) ──
+// ── JSON read API for the React frontend (Stage 12: auth-gated — was
+// public through Stage 11/EJS-removal, closed off since it exposed sales
+// totals, customer credit exposure and the full product/customer list to
+// anyone with the URL, no login needed) ──
 // Stage 9's aggregation now lives in lib/reports.js (getDashboardSummary)
 // so Stage 10's export module can reuse the exact same queries — this
 // route is just a thin JSON wrapper around it.
-app.get('/dashboard/load', asyncHandler(async (req, res) => {
+app.get('/dashboard/load', requireAuth, asyncHandler(async (req, res) => {
   const { range = 'month' } = req.query;
   const result = await getDashboardSummary(range);
   res.json({ success: true, dashboard: result });
 }));
 
-app.get('/api/products', asyncHandler(async (req, res) => {
+app.get('/api/products', requireAuth, asyncHandler(async (req, res) => {
   const { search = '', sortBy = 'productID', sortDir = 'asc' } = req.query;
   const { page, limit } = parsePagination(req.query);
 
@@ -151,7 +154,7 @@ app.get('/api/products', asyncHandler(async (req, res) => {
   res.json({ success: true, products, total, page, limit });
 }));
 
-app.get('/api/customers', asyncHandler(async (req, res) => {
+app.get('/api/customers', requireAuth, asyncHandler(async (req, res) => {
   const { search = '', sortBy = 'customerName', sortDir = 'asc' } = req.query;
   const { page, limit } = parsePagination(req.query);
 

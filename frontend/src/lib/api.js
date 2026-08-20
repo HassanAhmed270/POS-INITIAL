@@ -43,6 +43,10 @@ async function request(path, options = {}) {
 export const api = {
   // Auth
   login: (username, password) => request('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
+  // Stage 12: silent re-auth — call while a session is still valid to get
+  // a fresh token before the current one expires. See AuthContext.jsx for
+  // the interval that drives this.
+  refresh: () => request('/auth/refresh', { method: 'POST' }),
 
   // Products
   getProducts: (params = {}) => request(`/api/products?${new URLSearchParams(params)}`),

@@ -210,12 +210,13 @@ server-rendered UI, single Express + React deployment.
 
 **Public**
 - `POST /auth/login`
-- `GET /api/products`
-- `GET /api/customers`
-- `GET /dashboard/load`
 - `POST /billing/orderid`
 
 **Authenticated**
+- `POST /auth/refresh` (Stage 12)
+- `GET /api/products` (Stage 12: was public)
+- `GET /api/customers` (Stage 12: was public)
+- `GET /dashboard/load` (Stage 12: was public)
 - Product/customer mutation routes
 - Billing reserve/release/draft/order routes
 - Supplier routes
@@ -249,8 +250,13 @@ Exports:
 
 ## Current Known Cross-Cutting Gaps
 
-1. Some read routes remain public/auth-only.
-2. No refresh-token flow.
+1. ~~Some read routes remain public/auth-only.~~ Closed in Stage 12 —
+   `/dashboard/load`, `/api/products`, `/api/customers` now require auth.
+   `POST /billing/orderid` and `POST /auth/login` are the only
+   intentionally-public routes left (order-ID lookup during checkout and
+   login itself).
+2. ~~No refresh-token flow.~~ Closed in Stage 12 — see `POST /auth/refresh`
+   and the frontend's 30-minute silent-refresh interval.
 3. Billing receipt/cart does not display stored `discountAmount`.
 4. Refund cash-back vs store-credit is not distinguished.
 5. Stage 8 sort allow-list, fielded search and URL state remain absent.
@@ -260,7 +266,9 @@ Exports:
 
 ## Current Status
 
-Stages 1–10 are implemented and verified.
+Stages 1–10 and Stage 12 are implemented and verified (Stage 12's
+DB-touching paths syntax/logic-verified only — see its Verification
+section; no live MongoDB in this sandbox).
 
 Stage 11 is implemented and **end-to-end verified in the real browser and
 database**, including offline sale creation, durable queueing, automatic
@@ -273,6 +281,51 @@ No unresolved functional issue was found in the primary Stage 11 flow.
 
 Remaining items are deliberate scope limitations, security hardening,
 and stress-testing unless the next specification adds new functionality.
+
+## Spec Stage 12 — Close Remaining Security Gaps
+
+- `GET /dashboard/load`, `GET /api/products`, `GET /api/customers` were
+  public through Stage 11/EJS-removal; all three now require
+  `requireAuth`, same as every other data route.
+- Added `POST /auth/refresh`: silent re-auth. Requires a currently-valid
+  token (`requireAuth`), re-reads the user from the DB by `userId` (so a
+  deleted/deactivated account or role change takes effect immediately
+  instead of riding out the old token's claims), and issues a fresh token
+  with a new full-length expiry via the existing `signToken()`.
+- Frontend: `AuthContext.jsx` now runs a 30-minute interval while
+  `user` is set, calling `api.refresh()` and swapping in the new token —
+  comfortably inside the default 8h `JWT_EXPIRES_IN` even if that's later
+  configured shorter. A failed refresh (network hiccup) just retries next
+  interval; an outright 401 already flows through the existing
+  `auth:unauthorized` listener and logs the person out, same as before.
+  No new auth state machine — reuses the existing token store/listener
+  pattern from Spec Stage 1.
+- Known gap: refresh is purely interval-driven, not activity-aware — a
+  session extends every 30 minutes as long as the tab stays open, whether
+  or not the cashier is actively using it. That's an accepted tradeoff for
+  the "no full re-login mid-shift" exit criteria, not a bug.
+
+### Stage 12 Verification
+
+- `main.js`, `routes/auth.js`, `middleware/auth.js` pass `node --check`.
+- **No live MongoDB in this sandbox** (no `mongod` package available, and
+  the network egress allowlist doesn't include `mongodb.org`/Atlas) — the
+  three previously-public routes and `/auth/refresh` were boot-tested
+  against a running server with no DB connected: all four correctly
+  return `401` with no token, confirming the auth gate is live at the
+  HTTP layer before any Mongo call would even run.
+- `requireAuth` middleware was additionally unit-tested directly (mock
+  req/res, no HTTP/DB): a validly-signed token calls `next()` and
+  populates `req.user`; a missing token 401s with "Login required."; a
+  malformed token 401s with "Session expired.".
+- Did **not** verify: `auth/refresh`'s DB re-read (`User.findById`) and
+  the downstream `/api/products`/`/api/customers`/`/dashboard/load`
+  handlers past the auth gate, since that needs a live replica set this
+  sandbox doesn't have. Same limitation applies to the frontend's 30-min
+  refresh interval — code-reviewed and it builds clean, but not observed
+  firing against a real backend session.
+- Frontend: `npm run build` succeeds with the `AuthContext.jsx`/`api.js`
+  changes.
 
 ## Stage Numbering Note
 

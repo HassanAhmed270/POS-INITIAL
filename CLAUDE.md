@@ -55,6 +55,17 @@ checkout will fail.
 Copy `.env.example` to `.env` before running — `JWT_SECRET` is required;
 the app throws at boot without it (see `middleware/auth.js`).
 
+Tokens are a flat-expiry JWT (`JWT_EXPIRES_IN`, default 8h) with no
+built-in renewal at the JWT layer itself — session longevity instead
+comes from `POST /auth/refresh` (Stage 12): while a token is still valid,
+this issues a fresh one with a full new expiry. The frontend
+(`AuthContext.jsx`) calls it automatically on a 30-minute interval
+whenever a user is logged in, so a shift doesn't get interrupted by a
+forced re-login as long as the tab stays open. `/auth/refresh` re-reads
+the user from the DB (not just the token's claims) so a role change or
+account removal takes effect on the next refresh rather than riding out
+the old token.
+
 ## Architecture
 
 - **`main.js`** — single entry point: Express app, MongoDB connection,
@@ -98,7 +109,11 @@ the app throws at boot without it (see `middleware/auth.js`).
 3. Everything else under `/api`, `/billing`, `/product`, `/customer`,
    `/supplier`, `/dashboard/load` → inline route handlers in `main.js`,
    JSON in and out. (See `progress.md`'s Route Inventory for the full
-   list.)
+   list.) As of Stage 12, the only routes left intentionally public (no
+   `requireAuth`) are `POST /auth/login` and `POST /billing/orderid`;
+   everything else — including `GET /dashboard/load`, `GET /api/products`
+   and `GET /api/customers`, which were public through Stage 11/EJS-removal
+   — now requires a valid Bearer token.
 4. Any GET request that didn't match one of the above and isn't under
    `/api` or `/auth` → served `frontend/dist/index.html` (or a static
    asset from `frontend/dist` if the path matches one). React Router picks
