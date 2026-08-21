@@ -421,7 +421,8 @@ and stress-testing unless the next specification adds new functionality.
   action list only named the six above (`order.created/edited/refunded`,
   `product.created/updated`, `customer.updated`,
   `supplier.created/updated`); flagging this now rather than silently
-  expanding scope to guess at the rest.
+  expanding scope to guess at the rest. **Closed — see "Stage 14
+  (extended)" below.**
 
 ### Stage 14 Verification
 
@@ -450,6 +451,58 @@ and stress-testing unless the next specification adds new functionality.
   live. The `GET /api/audit-log` query/search/sort/pagination logic is
   code-reviewed only, following the same already-verified pattern used
   by Products/Customers/Orders/Suppliers, not independently live-tested.
+
+## Spec Stage 14 (extended) — Cover Deletes/Undos and Supplier Purchases
+
+Direct follow-up, requested immediately after the initial Stage 14
+delivery: close the known gap above rather than leave it unlogged.
+
+- Six more `logAudit()` call sites added, same pattern as the original
+  six (snapshot before/after, session threading where a transaction
+  already exists):
+  - `DELETE /product/:productID` → `product.deleted` (before: deleted
+    doc, after: null)
+  - `POST /product/undo` → `product.restored` (before: null if this was
+    a true restore-from-deleted, or the prior doc if one already existed
+    at that ID — both branches of the route's existing create-or-update
+    logic are covered)
+  - `POST /customer/deleteCustomer` → `customer.deleted`
+  - `POST /customer/undoCustomer` → `customer.restored`
+  - `DELETE /supplier/:supplierName` → `supplier.deleted`
+  - `POST /supplier/purchase` → `supplier.purchase` (inside the route's
+    existing transaction, same session — before: null since a purchase
+    is additive, after: the purchase record itself — `purchaseID`,
+    `supplierName`, `items`, `totalAmount`, `amountPaid`, `balanceDue`
+    — rather than the full `Supplier` doc, since the purchase is the
+    meaningful "what happened" here, not the supplier's other fields)
+- Frontend `AuditLog.jsx`: added the six new actions to `ACTION_LABELS`
+  and `ACTION_BADGE` (deletes shown in red, restores in green, purchase
+  alongside the other supplier actions in teal) so they render with a
+  real label instead of falling back to the raw `action` string.
+- All twelve action types now covered:
+  `order.created/edited/refunded`, `product.created/updated/deleted/
+  restored`, `customer.updated/deleted/restored`,
+  `supplier.created/updated/deleted/purchase`.
+
+### Stage 14 (extended) Verification
+
+- `node --check main.js` passes.
+- Frontend `npm run build` and `npm run lint` (oxlint) both pass, 0
+  errors.
+- Boot-tested live (no DB): all six newly-touched routes
+  (`DELETE /product/:productID`, `POST /product/undo`,
+  `POST /customer/deleteCustomer`, `POST /customer/undoCustomer`,
+  `DELETE /supplier/:supplierName`, `POST /supplier/purchase`) correctly
+  401 with no token, same as before this change — confirms adding the
+  `logAudit()` calls didn't disturb the existing `requireAuth` gate on
+  any of them. `GET /api/audit-log` regression-checked, still 401s
+  correctly too.
+- Not verified: the six new `logAudit()` call sites' actual behavior
+  against a live save/delete (no MongoDB replica set in this sandbox —
+  same limitation as the rest of Stage 12–14). Code-reviewed against the
+  real route logic for correct before/after snapshot timing and correct
+  session threading (the `supplier.purchase` entry is written inside
+  that route's existing transaction).
 
 ## Stage Numbering Note
 

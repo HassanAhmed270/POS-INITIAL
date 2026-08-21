@@ -14,9 +14,15 @@ const ACTION_LABELS = {
   'order.refunded': 'Order refunded',
   'product.created': 'Product created',
   'product.updated': 'Product updated',
+  'product.deleted': 'Product deleted',
+  'product.restored': 'Product restored',
   'customer.updated': 'Customer updated',
+  'customer.deleted': 'Customer deleted',
+  'customer.restored': 'Customer restored',
   'supplier.created': 'Supplier created',
   'supplier.updated': 'Supplier updated',
+  'supplier.deleted': 'Supplier deleted',
+  'supplier.purchase': 'Supplier purchase recorded',
 };
 
 const ACTION_BADGE = {
@@ -25,9 +31,15 @@ const ACTION_BADGE = {
   'order.refunded': 'bg-red-100 text-red-700',
   'product.created': 'bg-blue-100 text-blue-700',
   'product.updated': 'bg-blue-100 text-blue-700',
+  'product.deleted': 'bg-red-100 text-red-700',
+  'product.restored': 'bg-green-100 text-green-700',
   'customer.updated': 'bg-purple-100 text-purple-700',
+  'customer.deleted': 'bg-red-100 text-red-700',
+  'customer.restored': 'bg-green-100 text-green-700',
   'supplier.created': 'bg-teal-100 text-teal-700',
   'supplier.updated': 'bg-teal-100 text-teal-700',
+  'supplier.deleted': 'bg-red-100 text-red-700',
+  'supplier.purchase': 'bg-teal-100 text-teal-700',
 };
 
 export default function AuditLog() {

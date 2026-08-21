@@ -263,6 +263,16 @@ app.delete('/product/:productID', requireAuth, asyncHandler(async (req, res) => 
   if (!deleted) {
     return res.status(404).json({ success: false, message: 'Product not found.' });
   }
+
+  await logAudit({
+    action: 'product.deleted',
+    actor: { username: req.user.username, role: req.user.role },
+    targetType: 'product',
+    targetId: productID,
+    before: deleted.toObject(),
+    after: null,
+  });
+
   return res.status(200).json({ success: true, message: 'Product deleted successfully' });
 }));
 
@@ -271,6 +281,8 @@ app.post('/product/undo', requireAuth, asyncHandler(async (req, res) => {
   const threshold = parseThreshold(lowStockThreshold);
 
   const existingProduct = await Product.findOne({ productID: productId });
+  const beforeSnapshot = existingProduct ? existingProduct.toObject() : null;
+  let restoredProduct;
   if (existingProduct) {
     existingProduct.productName = productName;
     existingProduct.category = category;
@@ -280,6 +292,7 @@ app.post('/product/undo', requireAuth, asyncHandler(async (req, res) => {
     existingProduct.lowStockThreshold = threshold;
     existingProduct.supplier = supplier || 'N/A';
     await existingProduct.save();
+    restoredProduct = existingProduct;
   } else {
     const newProduct = new Product({
       productID: productId,
@@ -292,7 +305,17 @@ app.post('/product/undo', requireAuth, asyncHandler(async (req, res) => {
       supplier: supplier || 'N/A',
     });
     await newProduct.save();
+    restoredProduct = newProduct;
   }
+
+  await logAudit({
+    action: 'product.restored',
+    actor: { username: req.user.username, role: req.user.role },
+    targetType: 'product',
+    targetId: productId,
+    before: beforeSnapshot,
+    after: restoredProduct.toObject(),
+  });
 
   res.status(201).json({ ok: true, message: 'Product restored successfully!' });
 }));
@@ -353,6 +376,15 @@ app.post('/customer/deleteCustomer', requireAuth, asyncHandler(async (req, res) 
     return res.status(404).json({ success: false, message: 'Customer not found' });
   }
 
+  await logAudit({
+    action: 'customer.deleted',
+    actor: { username: req.user.username, role: req.user.role },
+    targetType: 'customer',
+    targetId: deletedCustomer.customerName,
+    before: deletedCustomer.toObject(),
+    after: null,
+  });
+
   res.status(200).json({ success: true, message: 'Customer deleted successfully', customer: deletedCustomer });
 }));
 
@@ -366,6 +398,15 @@ app.post('/customer/undoCustomer', requireAuth, asyncHandler(async (req, res) =>
 
   const newCustomer = new Customer({ customerName, mobileNo, emergencyMobile, email, address });
   await newCustomer.save();
+
+  await logAudit({
+    action: 'customer.restored',
+    actor: { username: req.user.username, role: req.user.role },
+    targetType: 'customer',
+    targetId: customerName,
+    before: null,
+    after: newCustomer.toObject(),
+  });
 
   res.status(200).json({ success: true, message: 'Customer restored successfully' });
 }));
@@ -852,6 +893,14 @@ app.delete('/supplier/:supplierName', requireAuth, asyncHandler(async (req, res)
   // scope) — a supplier's own purchase history goes with it. Deleting a
   // supplier does not touch Product.buyingPriceHistory entries that
   // reference it; those stay as a historical record.
+  await logAudit({
+    action: 'supplier.deleted',
+    actor: { username: req.user.username, role: req.user.role },
+    targetType: 'supplier',
+    targetId: deleted.supplierName,
+    before: deleted.toObject(),
+    after: null,
+  });
   res.status(200).json({ success: true, message: 'Supplier deleted successfully' });
 }));
 
@@ -922,6 +971,18 @@ app.post('/supplier/purchase', requireAuth, asyncHandler(async (req, res) => {
         { _id: supplier._id },
         { $push: { purchases: { purchaseID, totalAmount, amountPaid: paid, balanceDue, items: cleanItems } } },
         { session }
+      );
+
+      await logAudit(
+        {
+          action: 'supplier.purchase',
+          actor: { username: req.user.username, role: req.user.role },
+          targetType: 'supplier',
+          targetId: supplier.supplierName,
+          before: null,
+          after: { purchaseID, supplierName: supplier.supplierName, items: cleanItems, totalAmount, amountPaid: paid, balanceDue },
+        },
+        session
       );
     });
   } finally {
