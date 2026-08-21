@@ -116,6 +116,19 @@ the old token.
   reduced form — `AdminRoute` is for the rarer case of a screen that's
   admin-only outright. Either way, the backend route's own `requireAdmin`
   is the real boundary; frontend gating is UX only.
+  `Products.jsx`/`Suppliers.jsx` (Stage 19) follow the inline-`isAdmin`
+  pattern for their *master-data mutation* UI specifically — the Edit/
+  Delete icons, the Add/Update product form, and the Add Supplier form
+  are all `isAdmin`-only, while the page itself and (for Suppliers) the
+  restock form stay visible to every logged-in user. The matching
+  backend routes (`POST /api/product`, `DELETE /product/:productID`,
+  `POST /product/undo`, `POST /api/supplier`,
+  `DELETE /supplier/:supplierName`) carry `requireAdmin`; restocking
+  (`POST /supplier/purchase`) and customer creation
+  (`POST /billing/addCustomer`, `POST /customer/updateCustomer`)
+  deliberately do not — a worker can restock and manage customers, just
+  not create/edit/delete products or suppliers, from either the UI or a
+  direct API call.
   `components/LowStockBell.jsx` (Stage 15) is the same pattern applied to
   a header widget rather than a route: rendered from `Topbar.jsx` only
   when `isAdmin`, polls `GET /api/products/low-stock` on mount + every
@@ -174,6 +187,19 @@ works; `main.js` logs a warning at boot and there's just no UI to serve.
   `POST /billing/orderDetails` (commit) reads *that*, not anything sent in
   the request body — re-verifying price/discount against current DB values
   before committing stock and creating the `Order`.
+- **Walk-in / Unknown customer (Stage 19)**: `WALKIN_CUSTOMER = 'Walk-in
+  / Unknown'` is a plain sentinel *string*, defined identically in
+  `main.js` and `Billing.jsx` (not a special code — the frontend already
+  sends whatever's in `customer` state straight through as
+  `customerName`, same as a real customer name). `POST
+  /billing/orderDetails` special-cases only this exact value: it skips
+  the `Customer.findOne`/404 and skips the `Customer.updateOne $push`
+  that would otherwise record order history against a customer. Every
+  other part of commit (price re-verification, atomic stock decrement,
+  payment/balance math, the `Order` document, the audit log entry) is
+  unchanged — a walk-in sale is a fully real, fully audited `Order`, it's
+  just never attached to a `Customer` document, so it can never
+  contribute to a credit account or customer-order-history report.
 - **Two receipt layouts, one commit path (Stage 17)**: `Billing.jsx` has
   `printReceiptFor` (the original plain-table layout) and
   `printSpecialReceiptFor` (catering-invoice-style layout, added Stage

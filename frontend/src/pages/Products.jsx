@@ -167,7 +167,7 @@ export default function Products() {
 
           <div className="bg-white border rounded-lg w-full">
             <div className="flex flex-col lg:flex-row lg:h-[560px]">
-              <div className="w-full lg:w-2/3 flex flex-col">
+              <div className={`w-full ${isAdmin ? 'lg:w-2/3' : ''} flex flex-col`}>
                 <div className="overflow-x-auto lg:overflow-y-auto px-4 flex-1">
                   <table className="w-full min-w-[640px] text-sm">
                     <thead>
@@ -204,8 +204,14 @@ export default function Products() {
                                 {lowStock && <span className="ml-1 text-xs font-normal">⚠ low</span>}
                               </td>
                               <td className="py-2 px-3 flex gap-2">
-                                <button onClick={() => handleSelectForUpdate(p)} className="text-blue-600 hover:text-blue-800" title="Edit">✏️</button>
-                                <button onClick={() => handleDelete(p)} className="text-red-600 hover:text-red-800" title="Delete">🗑️</button>
+                                {isAdmin ? (
+                                  <>
+                                    <button onClick={() => handleSelectForUpdate(p)} className="text-blue-600 hover:text-blue-800" title="Edit">✏️</button>
+                                    <button onClick={() => handleDelete(p)} className="text-red-600 hover:text-red-800" title="Delete">🗑️</button>
+                                  </>
+                                ) : (
+                                  <span className="text-xs text-gray-400">—</span>
+                                )}
                               </td>
                             </tr>
                           );
@@ -217,6 +223,7 @@ export default function Products() {
                 <Pagination page={page} limit={PAGE_SIZE} total={total} onPageChange={setPage} />
               </div>
 
+              {isAdmin && (
               <div className="w-full lg:w-1/3 p-4 sm:p-8 border-t-4 lg:border-t-0 lg:border-l-4 border-gray-300 lg:overflow-y-auto">
                 <h2 className="text-2xl flex justify-center text-green-600 font-bold mb-4">
                   {mode === 'add' ? 'Add New Product' : 'Update Product'}
@@ -318,9 +325,11 @@ export default function Products() {
                   </div>
                 </form>
               </div>
+              )}
             </div>
           </div>
 
+          {isAdmin && (
           <div className="flex gap-4 mt-4 py-4">
             <button onClick={() => setMode('add')} className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">
               Add Product +
@@ -331,6 +340,7 @@ export default function Products() {
               </button>
             )}
           </div>
+          )}
         </div>
       </main>
     </div>

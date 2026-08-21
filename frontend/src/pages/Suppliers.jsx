@@ -162,7 +162,7 @@ export default function Suppliers() {
 
           <div className="bg-white border rounded-lg w-full">
             <div className="flex flex-col lg:flex-row">
-              <div className="w-full lg:w-2/3 flex flex-col overflow-x-auto">
+              <div className={`w-full ${isAdmin ? 'lg:w-2/3' : ''} flex flex-col overflow-x-auto`}>
                 <table className="w-full min-w-[640px] text-sm">
                   <thead>
                     <tr className="border-b bg-gray-100">
@@ -194,13 +194,17 @@ export default function Suppliers() {
                               {formatMoney(s.totalBalanceDue)}
                             </td>
                             <td className="py-2 px-3">
-                              <button
-                                onClick={(e) => { e.stopPropagation(); handleDeleteSupplier(s); }}
-                                className="text-red-600 hover:text-red-800"
-                                title="Delete"
-                              >
-                                🗑️
-                              </button>
+                              {isAdmin ? (
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); handleDeleteSupplier(s); }}
+                                  className="text-red-600 hover:text-red-800"
+                                  title="Delete"
+                                >
+                                  🗑️
+                                </button>
+                              ) : (
+                                <span className="text-xs text-gray-400">—</span>
+                              )}
                             </td>
                           </tr>
                           {expandedName === s.supplierName && (
@@ -246,6 +250,7 @@ export default function Suppliers() {
                 <Pagination page={page} limit={PAGE_SIZE} total={total} onPageChange={setPage} />
               </div>
 
+              {isAdmin && (
               <div className="w-full lg:w-1/3 p-4 sm:p-6 border-t-4 lg:border-t-0 lg:border-l-4 border-gray-300 lg:overflow-y-auto">
                 <h2 className="text-xl flex justify-center text-blue-600 font-bold mb-4">Add Supplier</h2>
                 <form onSubmit={handleAddSupplier} className="space-y-3 text-sm">
@@ -289,6 +294,7 @@ export default function Suppliers() {
                   </button>
                 </form>
               </div>
+              )}
             </div>
           </div>
 

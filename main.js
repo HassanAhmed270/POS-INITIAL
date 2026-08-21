@@ -46,6 +46,13 @@ const DRAFT_SWEEP_INTERVAL_MS = parseInt(process.env.DRAFT_SWEEP_INTERVAL_MS) ||
 // How long after orderDate an admin can still edit an order's line items
 // (Stage 7). Refunds are NOT subject to this window — only edits are.
 const ORDER_EDIT_WINDOW_MS = 72 * 60 * 60 * 1000; // 72 hours
+// Stage 19: the sentinel customerName for a walk-in/unknown-customer sale.
+// Chosen to double as the human-readable label everywhere customerName is
+// displayed (receipts, Orders list, audit log) — it's a real string stored
+// on Order.customerName, not a code, so nothing downstream needs to know
+// about it specially except the two spots below that skip the Customer
+// collection for it.
+const WALKIN_CUSTOMER = 'Walk-in / Unknown';
 
 // ── Core middleware ─────────────────────────────────────────
 app.use(express.urlencoded({ extended: true }));
@@ -216,7 +223,7 @@ app.get('/api/customers', requireAuth, asyncHandler(async (req, res) => {
 // (requireAdmin is available in middleware/auth.js for role-gating
 // specific actions like edits/refunds in a later stage.)
 
-app.post('/api/product', requireAuth, asyncHandler(async (req, res) => {
+app.post('/api/product', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
   const { productId, productName, category, price, stock, supplier, already, lowStockThreshold } = req.body;
 
   if (!isValidProductId(productId)) {
@@ -282,7 +289,7 @@ app.post('/api/product', requireAuth, asyncHandler(async (req, res) => {
   res.status(200).json({ success: true, message: 'Product saved successfully' });
 }));
 
-app.delete('/product/:productID', requireAuth, asyncHandler(async (req, res) => {
+app.delete('/product/:productID', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
   const { productID } = req.params;
   const deleted = await Product.findOneAndDelete({ productID });
 
@@ -302,7 +309,7 @@ app.delete('/product/:productID', requireAuth, asyncHandler(async (req, res) => 
   return res.status(200).json({ success: true, message: 'Product deleted successfully' });
 }));
 
-app.post('/product/undo', requireAuth, asyncHandler(async (req, res) => {
+app.post('/product/undo', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
   const { productId, productName, category, price, stock, supplier, lowStockThreshold } = req.body;
   const threshold = parseThreshold(lowStockThreshold);
 
@@ -643,8 +650,12 @@ app.post('/billing/orderDetails', requireAuth, asyncHandler(async (req, res) => 
     return res.status(400).json({ success: false, message: 'Invalid customer selected.' });
   }
 
-  const customer = await Customer.findOne({ customerName: draft.customerName });
-  if (!customer) {
+  // Stage 19: a walk-in sale intentionally has no backing Customer record
+  // — it's recorded against the sentinel name only, so there's nothing to
+  // look up or require here.
+  const isWalkIn = draft.customerName === WALKIN_CUSTOMER;
+  const customer = isWalkIn ? null : await Customer.findOne({ customerName: draft.customerName });
+  if (!isWalkIn && !customer) {
     return res.status(400).json({ success: false, message: `Customer "${draft.customerName}" not found.` });
   }
 
@@ -748,21 +759,27 @@ app.post('/billing/orderDetails', requireAuth, asyncHandler(async (req, res) => 
       );
       order = created[0];
 
-      await Customer.updateOne(
-        { customerName: draft.customerName },
-        {
-          $push: {
-            orders: {
-              orderNo: draft.billID,
-              orderDate: new Date(),
-              totalAmount: verifiedTotal,
-              amountPaid,
-              balanceDue,
+      // Stage 19: walk-in sales don't get a customer order-history push —
+      // there's no Customer document to push it onto, and creating one
+      // just for this would defeat the point (no unnecessary customer/
+      // credit record for an untracked sale).
+      if (!isWalkIn) {
+        await Customer.updateOne(
+          { customerName: draft.customerName },
+          {
+            $push: {
+              orders: {
+                orderNo: draft.billID,
+                orderDate: new Date(),
+                totalAmount: verifiedTotal,
+                amountPaid,
+                balanceDue,
+              },
             },
           },
-        },
-        { session }
-      );
+          { session }
+        );
+      }
 
       // Consume the draft: mark it committed and clear its items so the
       // next bill this cashier starts (same document, upserted by
@@ -874,7 +891,7 @@ app.get('/api/suppliers', requireAuth, asyncHandler(async (req, res) => {
   res.json({ success: true, suppliers: withBalance, total, page, limit });
 }));
 
-app.post('/api/supplier', requireAuth, asyncHandler(async (req, res) => {
+app.post('/api/supplier', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
   let { supplierName, contactPerson, phone, email, address } = req.body;
 
   if (!supplierName || !supplierName.trim()) {
@@ -910,7 +927,7 @@ app.post('/api/supplier', requireAuth, asyncHandler(async (req, res) => {
   res.status(200).json({ success: true, message: 'Supplier saved successfully', supplier });
 }));
 
-app.delete('/supplier/:supplierName', requireAuth, asyncHandler(async (req, res) => {
+app.delete('/supplier/:supplierName', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
   const deleted = await Supplier.findOneAndDelete({ supplierName: req.params.supplierName });
   if (!deleted) {
     return res.status(404).json({ success: false, message: 'Supplier not found.' });

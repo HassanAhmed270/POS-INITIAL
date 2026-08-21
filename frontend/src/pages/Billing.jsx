@@ -9,6 +9,12 @@ import { isNetworkError, flushQueue } from '../lib/offlineSync';
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const emptyCustomerForm = { customerName: '', mobileNo: '', emergencyMobile: '', email: '', address: '' };
+// Stage 19: sentinel customerName for an untracked walk-in sale — must
+// match WALKIN_CUSTOMER in main.js exactly, since this string is sent
+// straight through as the order's customerName (same as any real
+// customer's name is today) and the backend special-cases this one value
+// to skip the Customer lookup/record entirely.
+const WALKIN_CUSTOMER = 'Walk-in / Unknown';
 
 
 export default function Billing() {
@@ -678,6 +684,7 @@ export default function Billing() {
               className="border border-gray-300 rounded-lg px-3 py-2 w-full sm:w-52 focus:ring-2 focus:ring-brand focus:outline-none"
             >
               <option value="unknown">Select Customer</option>
+              <option value={WALKIN_CUSTOMER}>🚶 Walk-in / Unknown</option>
               {customers.map((name) => (
                 <option key={name} value={name}>{name}</option>
               ))}

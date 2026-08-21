@@ -318,18 +318,128 @@ present yet, so this doesn't break anything before the logo is actually
 added. Not verified with a real file in this sandbox — only that the
 markup builds clean and degrades safely without one.
 
+## Stage 19 — Worker Permissions & Walk-in / Unknown Customers
+
+(Stage 18 — Desktop Distribution — remains skipped/deferred; commented
+out in `optimization.md` rather than deleted, per the person's note that
+it tends to get skipped. Picking up at 19.)
+
+**Backend permission tightening** — `requireAdmin` added (alongside the
+existing `requireAuth`) to the product and supplier *master-data*
+mutation routes: `POST /api/product` (create/update), `DELETE
+/product/:productID`, `POST /product/undo`, `POST /api/supplier`
+(create/update), `DELETE /supplier/:supplierName`. This is enforced at
+the route/middleware level, same pattern as the existing admin-only
+routes (`/billing/update`, `/api/order/:orderID/edit`, etc.) — a worker
+calling these directly with a valid worker token now gets a clean 403
+`{ success: false, message: 'Admins only.' }`, not just a hidden button.
+
+**Deliberately left `requireAuth`-only (not admin-gated):**
+`POST /supplier/purchase` (restocking) and `POST /billing/addCustomer` /
+`POST /customer/updateCustomer` — restocking is inventory work, not
+supplier*-management* (it references an existing supplier, it doesn't
+create/edit/delete one), and customer creation is explicitly meant to
+stay available to workers per the spec. This matches Stage 20's existing
+note in `optimization.md` that a restock screen shouldn't imply
+supplier-management rights.
+
+**Frontend UI gating** — `Products.jsx` and `Suppliers.jsx` already
+imported `useAuth`/`isAdmin` for the Stage 13 "previous price" display;
+that same flag now also gates the mutation UI itself for non-admins:
+
+* Products — the Edit/Delete icons per row, the whole Add/Update form
+  panel, and the "Add Product +" / "Undo Deleted" buttons are all
+  `isAdmin`-only. A worker sees the product table (read-only) with an
+  em-dash in the Actions column instead of the icons, and the whole
+  right-hand form panel doesn't render (list takes the full width
+  instead of 2/3).
+* Suppliers — the Delete icon per row and the whole "Add Supplier" form
+  panel are `isAdmin`-only. The "Record a Purchase" (restock) form below
+  is untouched and stays available to everyone, matching the backend.
+
+No change was needed to `App.jsx`/`Sidebar.jsx` routing — both pages stay
+reachable by workers (they still need to browse products/suppliers and
+restock), only the mutation affordances inside them are gated. This is
+different from Stage 14's Audit Log pattern (fully admin-only route via
+`AdminRoute`), which fits here since Stage 19 explicitly wants workers to
+keep read/restock access, not be bounced from the page.
+
+**Walk-in / Unknown customer** — a new `Walk-in / Unknown` option was
+added to Billing's customer dropdown (`🚶 Walk-in / Unknown`), between
+the placeholder and the real customer list. This is a plain sentinel
+*string*, not a code — `WALKIN_CUSTOMER = 'Walk-in / Unknown'` is defined
+identically in both `main.js` and `Billing.jsx` (with a comment on each
+side pointing at the other) since the frontend already sends whatever's
+in `customer` state straight through as `customerName`, same as any real
+customer name. No new field, no new draft/order shape.
+
+`POST /billing/orderDetails` now special-cases this exact value: it
+skips the `Customer.findOne` lookup/404 entirely (there's nothing to
+find) and skips the `Customer.updateOne $push` that records order history
+against a customer (there's no customer document to push onto). Every
+other part of the existing commit path — price re-verification, the
+atomic stock decrement, payment/balance calculation, the Order document
+itself, the audit log entry — runs unchanged; a walk-in sale is a fully
+real, fully audited `Order`, it's just not attached to any `Customer`
+document. Dashboard/report aggregations that group by `Order.customerName`
+directly (`lib/reports.js`'s sales/refund summaries, CSV exports) will
+naturally show "Walk-in / Unknown" as a bucket; the *credit*-related
+aggregations (`Customer.aggregate` for total credit, the payables report
+keyed off `Customer.find({'orders.balanceDue': {$gt:0}})`) never see
+walk-in sales at all, since nothing was ever pushed to a Customer
+document — so a walk-in sale can never accidentally create/contribute to
+a credit account, per spec.
+
+No changes were needed to `POST /billing/draft` (already accepts any
+`customerName` string permissively — it just autosaves whatever's typed)
+or to `PendingBill`/`Order`/`Customer` schemas.
+
+**Verified:** `node --check` clean on every touched/adjacent backend
+file. Live boot test (no MongoDB in this sandbox): unauthenticated
+requests to the now-admin-gated routes → 401 (unchanged); a worker-role
+JWT against `POST /api/product`, `POST /api/supplier`, `DELETE
+/product/:productID`, `POST /product/undo`, `DELETE
+/supplier/:supplierName` → clean 403 `Admins only.`; the same worker
+token against `POST /supplier/purchase`, `POST /billing/addCustomer`,
+`GET /api/products`, and `POST /billing/draft` with
+`customerName: "Walk-in / Unknown"` → all pass the auth/role gate (500,
+not 401/403 — the expected shape with no live DB in this sandbox); an
+admin-role JWT against `POST /api/product` and `DELETE
+/supplier/:supplierName` → likewise passes the gate (500, not 403).
+`npm run build` and `npm run lint` clean on the frontend — same one
+pre-existing unrelated `AuthContext.jsx` warning as every prior stage, no
+new ones. Re-ran the full boot test against the built `frontend/dist`
+afterward: `/`, `/products`, `/suppliers`, `/billing` (SPA routes) → 200,
+unknown `/api/*` → clean JSON 404, `GET /api/products` with no token →
+401 (regression, unchanged).
+
+**Not verified:** no live MongoDB replica set or real browser in this
+sandbox — the actual DB-backed behavior (a worker's product/supplier
+mutation attempt being rejected *after* successfully authenticating, a
+real walk-in order committing end-to-end and never appearing in a credit
+report, the dropdown/UI rendering correctly for a logged-in worker vs.
+admin) is code-reviewed and auth/role-gate-tested only, not exercised
+against a real database or in a real browser. Recommend a manual pass
+(log in as both roles, try Products/Suppliers mutations as a worker, run
+a walk-in sale through Billing) before treating this fully closed.
+
 ## Route Inventory — End of Stage 15
 
 **Public:** `POST /auth/login`, `POST /billing/orderid`
 **Authenticated:** `POST /auth/refresh`, `GET /api/products`,
-`GET /api/customers`, `GET /dashboard/load`, product/customer/supplier
-mutation routes, billing reserve/release/draft/order routes,
+`GET /api/customers`, `GET /dashboard/load`, customer mutation routes,
+`POST /supplier/purchase` (restock), billing reserve/release/draft/order
+routes (including a `Walk-in / Unknown` `customerName`, Stage 19),
 `GET /api/orders(/:orderID)`, Stage 10 export routes,
 `POST /api/sync/commit`
 **Authenticated + Admin:** `POST /billing/update`,
 `POST /api/order/:orderID/edit`, `POST /api/order/:orderID/refund`,
 `GET /api/sync/conflicts`, `POST /api/sync/conflicts/:id/resolve`,
-`GET /api/audit-log`, `GET /api/products/low-stock` (Stage 15)
+`GET /api/audit-log`, `GET /api/products/low-stock` (Stage 15),
+`POST /api/product`, `DELETE /product/:productID`, `POST /product/undo`,
+`POST /api/supplier`, `DELETE /supplier/:supplierName` (Stage 19 — moved
+from plain `requireAuth`; product/supplier *master-data* mutations are
+now admin-only, restocking and customer creation remain worker-accessible)
 **Frontend:** unmatched GET outside `/api`/`/auth` → `index.html`; React
 Router owns `/`, `/dashboard`, `/billing`, `/products`, `/customers`,
 `/suppliers`, `/orders`, `/reports`, `/audit-log` (admin-only). Unmatched
@@ -350,8 +460,10 @@ supports `range=week|month|year`. Exports: `summary`, `sales`, `refunds`,
 
 ## Current Status
 
-Stages 1–17 implemented. Stage 11 **end-to-end verified in a real
-browser + database**. Stages 1–10/12–17 verified by
+Stages 1–17 and 19 implemented (Stage 18, desktop distribution, remains
+deliberately skipped/deferred — see the note at the top of its Stage 19
+entry above). Stage 11 **end-to-end verified in a real browser +
+database**. Stages 1–10/12–17/19 verified by
 build/lint/`node --check`/boot-test/unit-test per stage above — DB paths
 past the auth gate are code-reviewed only (no replica set in this
 sandbox), Stage 16's responsive layout and Stage 17's print/preview
