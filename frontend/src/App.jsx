@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { useEffect } from 'react';
 import { AuthProvider } from './lib/AuthContext';
 import ProtectedRoute from './components/ProtectedRoute';
+import AdminRoute from './components/AdminRoute';
 import { startOfflineSyncWatcher } from './lib/offlineSync';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
@@ -11,6 +12,7 @@ import Customers from './pages/Customers';
 import Suppliers from './pages/Suppliers';
 import Orders from './pages/Orders';
 import Reports from './pages/Reports';
+import AuditLog from './pages/AuditLog';
 
 export default function App() {
   // Stage 11 — starts the background flush loop for any offline sales
@@ -81,6 +83,14 @@ export default function App() {
               <ProtectedRoute>
                 <Reports />
               </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/audit-log"
+            element={
+              <AdminRoute>
+                <AuditLog />
+              </AdminRoute>
             }
           />
         </Routes>

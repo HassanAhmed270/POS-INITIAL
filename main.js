@@ -12,6 +12,7 @@ const Customer = require('./models/Customers');
 const PendingBill = require('./models/PendingBill');
 const Supplier = require('./models/Supplier');
 const Refund = require('./models/Refunds');
+const AuditLog = require('./models/AuditLog');
 
 const logger = require('./lib/logger');
 const authRoutes = require('./routes/auth');
@@ -22,6 +23,7 @@ const { roundMoney } = require('./lib/money');
 const { getLatestSellingPrice, getLatestBuyingPrice } = require('./lib/pricing');
 const { escapeRegex, parsePagination, sortAndPaginate } = require('./lib/query');
 const { getDashboardSummary } = require('./lib/reports');
+const { logAudit } = require('./lib/auditLog');
 const exportRoutes = require('./routes/export');
 const syncRoutes = require('./routes/sync');
 const {
@@ -201,6 +203,8 @@ app.post('/api/product', requireAuth, asyncHandler(async (req, res) => {
   const submittedPrice = roundMoney(price);
   const threshold = parseThreshold(lowStockThreshold);
   const existingProduct = await Product.findOne({ productID: productId });
+  // Stage 14: snapshot before any mutation, for the audit entry below.
+  const beforeSnapshot = existingProduct ? existingProduct.toObject() : null;
 
   if (existingProduct) {
     const updatedStock =
@@ -219,6 +223,14 @@ app.post('/api/product', requireAuth, asyncHandler(async (req, res) => {
       existingProduct.sellingPriceHistory.push({ price: submittedPrice, date: new Date() });
     }
     await existingProduct.save();
+    await logAudit({
+      action: 'product.updated',
+      actor: { username: req.user.username, role: req.user.role },
+      targetType: 'product',
+      targetId: productId,
+      before: beforeSnapshot,
+      after: existingProduct.toObject(),
+    });
   } else {
     const newProduct = new Product({
       productID: productId,
@@ -231,6 +243,14 @@ app.post('/api/product', requireAuth, asyncHandler(async (req, res) => {
       supplier: supplier || 'N/A',
     });
     await newProduct.save();
+    await logAudit({
+      action: 'product.created',
+      actor: { username: req.user.username, role: req.user.role },
+      targetType: 'product',
+      targetId: productId,
+      before: null,
+      after: newProduct.toObject(),
+    });
   }
 
   res.status(200).json({ success: true, message: 'Product saved successfully' });
@@ -297,6 +317,7 @@ app.post('/customer/updateCustomer', requireAuth, asyncHandler(async (req, res) 
     return res.status(400).json({ success: false, message: 'That phone number doesn\'t look right.' });
   }
 
+  const beforeCustomer = await Customer.findOne({ customerName });
   const updatedCustomer = await Customer.findOneAndUpdate(
     { customerName },
     { $set: { mobileNo, emergencyMobile, email, address } },
@@ -306,6 +327,15 @@ app.post('/customer/updateCustomer', requireAuth, asyncHandler(async (req, res) 
   if (!updatedCustomer) {
     return res.status(404).json({ success: false, message: 'Customer not found' });
   }
+
+  await logAudit({
+    action: 'customer.updated',
+    actor: { username: req.user.username, role: req.user.role },
+    targetType: 'customer',
+    targetId: customerName,
+    before: beforeCustomer ? beforeCustomer.toObject() : null,
+    after: updatedCustomer.toObject(),
+  });
 
   res.status(200).json({ success: true, message: 'Customer updated successfully', customer: updatedCustomer });
 }));
@@ -675,6 +705,18 @@ app.post('/billing/orderDetails', requireAuth, asyncHandler(async (req, res) => 
         { status: 'committed', items: [], paidInput: 0, updatedAt: new Date() },
         { session }
       );
+
+      await logAudit(
+        {
+          action: 'order.created',
+          actor: { username: req.user.username, role: req.user.role },
+          targetType: 'order',
+          targetId: order.orderID,
+          before: null,
+          after: order.toObject(),
+        },
+        session
+      );
     });
   } finally {
     await session.endSession();
@@ -782,11 +824,21 @@ app.post('/api/supplier', requireAuth, asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'That phone number doesn\'t look right.' });
   }
 
+  const beforeSupplier = await Supplier.findOne({ supplierName });
   const supplier = await Supplier.findOneAndUpdate(
     { supplierName },
     { supplierName, contactPerson: contactPerson || '', phone, email, address: address || '' },
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
+
+  await logAudit({
+    action: beforeSupplier ? 'supplier.updated' : 'supplier.created',
+    actor: { username: req.user.username, role: req.user.role },
+    targetType: 'supplier',
+    targetId: supplierName,
+    before: beforeSupplier ? beforeSupplier.toObject() : null,
+    after: supplier.toObject(),
+  });
 
   res.status(200).json({ success: true, message: 'Supplier saved successfully', supplier });
 }));
@@ -930,6 +982,38 @@ app.get('/api/orders/:orderID', requireAuth, asyncHandler(async (req, res) => {
   res.json({ success: true, order, refunds });
 }));
 
+// ── Audit Log (Stage 14) — admin-only, read-only. See lib/auditLog.js
+// for how entries get written and how the collection stays bounded.
+app.get('/api/audit-log', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  const { search = '', sortBy = 'date', sortDir = 'desc', action = '' } = req.query;
+  const { page, limit } = parsePagination(req.query);
+
+  const filter = {};
+  if (action) filter.action = action;
+  if (search) {
+    filter.$or = [
+      { 'actor.username': { $regex: escapeRegex(search), $options: 'i' } },
+      { targetId: { $regex: escapeRegex(search), $options: 'i' } },
+      { action: { $regex: escapeRegex(search), $options: 'i' } },
+    ];
+  }
+
+  const data = await AuditLog.find(filter);
+  const mapped = data.map((a) => ({
+    _id: a._id,
+    action: a.action,
+    actor: a.actor,
+    targetType: a.targetType,
+    targetId: a.targetId,
+    before: a.before,
+    after: a.after,
+    date: a.date,
+  }));
+
+  const { data: entries, total } = sortAndPaginate(mapped, { sortBy, sortDir, page, limit });
+  res.json({ success: true, entries, total, page, limit });
+}));
+
 // ── Admin bill editing & refunds (Stage 7) ──────────────────
 // Edit and refund share the same core operation — reduce/remove a line
 // item, restore the matching stock atomically, log an audit entry, and
@@ -1023,6 +1107,7 @@ app.post('/api/order/:orderID/edit', requireAuth, requireAdmin, asyncHandler(asy
         throw new AppError(403, 'The 72-hour edit window for this order has expired.');
       }
 
+      const beforeOrder = order.toObject();
       await applyLineReduction(order, productID, qty, reason.trim(), 'edit', req.user.username, session);
       recomputeOrderTotals(order);
       await order.save({ session });
@@ -1032,6 +1117,18 @@ app.post('/api/order/:orderID/edit', requireAuth, requireAdmin, asyncHandler(asy
         { customerName: order.customerName, 'orders.orderNo': order.orderID },
         { $set: { 'orders.$.totalAmount': order.totalAmount, 'orders.$.balanceDue': order.balanceDue } },
         { session }
+      );
+
+      await logAudit(
+        {
+          action: 'order.edited',
+          actor: { username: req.user.username, role: req.user.role },
+          targetType: 'order',
+          targetId: order.orderID,
+          before: beforeOrder,
+          after: order.toObject(),
+        },
+        session
       );
 
       updatedOrder = order;
@@ -1075,6 +1172,7 @@ app.post('/api/order/:orderID/refund', requireAuth, requireAdmin, asyncHandler(a
         throw new AppError(400, 'This order has already been refunded.');
       }
 
+      const beforeOrder = order.toObject();
       const refundedItems = [];
       let refundAmount = 0;
 
@@ -1121,6 +1219,18 @@ app.post('/api/order/:orderID/refund', requireAuth, requireAdmin, asyncHandler(a
         { customerName: order.customerName, 'orders.orderNo': order.orderID },
         { $set: { 'orders.$.totalAmount': order.totalAmount, 'orders.$.balanceDue': order.balanceDue } },
         { session }
+      );
+
+      await logAudit(
+        {
+          action: 'order.refunded',
+          actor: { username: req.user.username, role: req.user.role },
+          targetType: 'order',
+          targetId: order.orderID,
+          before: beforeOrder,
+          after: order.toObject(),
+        },
+        session
       );
 
       updatedOrder = order;

@@ -73,7 +73,8 @@ the old token.
   frontend-serving block, then the centralized error handler.
 - **`models/`** — Mongoose schemas: `Product`, `Customers`, `Order`,
   `PendingBill` (Stage 4 draft carts), `Supplier`, `Refunds`, `user`
-  (login accounts), and `OfflineSale` (Stage 11, optional module).
+  (login accounts), `OfflineSale` (Stage 11, optional module), and
+  `AuditLog` (Stage 14 — see below).
   - `Product.js` — `productID` (format `#0000`, regex-enforced, unique),
     `sellingPriceHistory`/`buyingPriceHistory` (arrays of `{price, date}` —
     a price *history*, not a scalar — see `lib/pricing.js`'s
@@ -84,19 +85,37 @@ the old token.
     `{productID, quantity, amount, discount, discountType,
     discountAmount}`), `cashier`, `totalAmount`, `amountPaid`,
     `balanceDue`, `paymentStatus`, `payments[]`, `editHistory[]` (Stage 7).
+  - `AuditLog.js` (Stage 14) — `action`, `actor {username, role}`,
+    `targetType`, `targetId`, `before`/`after` snapshots, `date`.
+    **Fixed-size ring buffer**, not an unbounded log — see
+    `lib/auditLog.js`. Written only via `logAudit()`; nothing should
+    insert into this collection directly.
 - **`routes/`** — `auth.js` (login/JWT), `export.js` (Stage 10, CSV
   export), `sync.js` (Stage 11, offline sync). Everything else — including
   order edit/refund (`POST /api/order/:orderID/edit`,
-  `POST /api/order/:orderID/refund`) — is still inline in `main.js`.
+  `POST /api/order/:orderID/refund`) and the audit log
+  (`GET /api/audit-log`, Stage 14) — is still inline in `main.js`.
 - **`lib/`** — shared logic: `pricing.js`, `money.js` (rounding),
   `validators.js`, `query.js` (pagination/sort helpers), `errors.js`
   (`AppError`), `reports.js` (Stage 9/10 dashboard + export aggregation),
   `csv.js` (dependency-free CSV writer), `offlineSync.js` (Stage 11 offline
-  commit logic).
+  commit logic), `auditLog.js` (Stage 14 — `logAudit(entry, session?)`;
+  pass the transaction's `session` when calling from inside an existing
+  `session.withTransaction()` block — order commit/edit/refund — omit it
+  for routes with no transaction of their own, currently product/customer/
+  supplier saves).
 - **`frontend/`** — the entire UI. React (Vite, Tailwind via
   `@tailwindcss/vite`, no CDN), React Router for client-side routing. Talks
   to the backend over JSON only, via `frontend/src/lib/api.js` — every
   backend call goes through that one file. See `frontend/README.md`.
+  Route guarding: `ProtectedRoute.jsx` (must be logged in — used by most
+  screens) vs. `AdminRoute.jsx` (Stage 14 — must be logged in *and*
+  admin; currently only `/audit-log`). Most admin-only *behavior* within
+  a screen (e.g. Orders' edit/refund buttons) is instead an inline
+  `isAdmin` check from `useAuth()`, same page visible to everyone in a
+  reduced form — `AdminRoute` is for the rarer case of a screen that's
+  admin-only outright. Either way, the backend route's own `requireAdmin`
+  is the real boundary; frontend gating is UX only.
 - **`middleware/`** — `auth.js` (`requireAuth`/`requireAdmin`, JWT),
   `errorHandler.js` (`asyncHandler` wrapper + centralized error middleware).
 

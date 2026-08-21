@@ -124,6 +124,9 @@ export const api = {
   deleteSupplier: (supplierName) => request(`/supplier/${encodeURIComponent(supplierName)}`, { method: 'DELETE' }),
   recordPurchase: (payload) => request('/supplier/purchase', { method: 'POST', body: JSON.stringify(payload) }),
 
+  // Audit Log (Stage 14, admin-only — backend also enforces this via requireAdmin)
+  getAuditLog: (params = {}) => request(`/api/audit-log?${new URLSearchParams(params)}`),
+
   // Orders, admin edit & refund (Stage 7)
   getOrders: (params = {}) => request(`/api/orders?${new URLSearchParams(params)}`),
   getOrder: (orderID) => request(`/api/orders/${encodeURIComponent(orderID)}`),

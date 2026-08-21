@@ -13,8 +13,14 @@ const links = [
   { to: '/webpage', label: 'Webpage', disabled: true },
 ];
 
+// Stage 14: Audit Log is admin-only, so it's appended separately rather
+// than living in the shared `links` array — cashiers never see this
+// entry at all (not even disabled/greyed-out), matching AdminRoute's
+// "bounce, don't just hide" behavior on the page itself.
+const adminOnlyLinks = [{ to: '/audit-log', label: 'Audit Log' }];
+
 export default function Sidebar() {
-  const { logout } = useAuth();
+  const { logout, isAdmin } = useAuth();
   const navigate = useNavigate();
 
   const handleLogout = () => {
@@ -22,11 +28,13 @@ export default function Sidebar() {
     navigate('/');
   };
 
+  const visibleLinks = isAdmin ? [...links, ...adminOnlyLinks] : links;
+
   return (
     <aside className="w-64 shrink-0 bg-brand text-white flex flex-col">
       <div className="p-6 text-2xl font-bold border-b border-brand-dark">Dashboard</div>
       <nav className="flex-1 py-4">
-        {links.map((link) =>
+        {visibleLinks.map((link) =>
           link.disabled ? (
             <span
               key={link.label}

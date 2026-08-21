@@ -231,13 +231,15 @@ server-rendered UI, single Express + React deployment.
 - `POST /api/order/:orderID/refund`
 - `GET /api/sync/conflicts`
 - `POST /api/sync/conflicts/:id/resolve`
+- `GET /api/audit-log` (Stage 14)
 
 **Frontend (all other GET requests)**
 - Any unmatched GET not under `/api` or `/auth` serves
   `frontend/dist/index.html`; React Router owns everything from there
   (`/`, `/dashboard`, `/billing`, `/products`, `/customers`, `/suppliers`,
-  `/orders`, `/reports`). An unmatched `/api/*` or `/auth/*` request 404s
-  as JSON instead.
+  `/orders`, `/reports`, `/audit-log` — the last is admin-only client-side
+  via `AdminRoute.jsx`, Stage 14; a cashier is bounced to `/dashboard`).
+  An unmatched `/api/*` or `/auth/*` request 404s as JSON instead.
 
 List routes support:
 `search`, `sortBy`, `sortDir`, `page`, `limit`.
@@ -266,9 +268,9 @@ Exports:
 
 ## Current Status
 
-Stages 1–10, 12, and 13 are implemented and verified (Stage 12/13's
-DB-touching or live-browser paths are syntax/logic-verified only — see
-each Verification section; no live MongoDB in this sandbox).
+Stages 1–10, 12, 13, and 14 are implemented and verified (Stage
+12/13/14's DB-touching or live-browser paths are syntax/logic-verified
+only — see each Verification section; no live MongoDB in this sandbox).
 
 Stage 11 is implemented and **end-to-end verified in the real browser and
 database**, including offline sale creation, durable queueing, automatic
@@ -364,6 +366,90 @@ and stress-testing unless the next specification adds new functionality.
   available here). Logic was traced by hand against the actual
   `GET /api/products` response shape (`price`, `costPrice` fields
   confirmed present in `main.js`) rather than observed live.
+
+## Spec Stage 14 — Unified Audit Log (Admin-only)
+
+- New `models/AuditLog.js`: one document per logged action —
+  `action`, `actor {username, role}`, `targetType`, `targetId`,
+  `before`/`after` snapshots (not diffs — simpler to render, some
+  redundancy accepted), `date`. Indexed on `date` descending.
+- New `lib/auditLog.js`: `logAudit(entry, session?)` — writes the entry,
+  then trims the collection back to `AUDIT_LOG_MAX_ENTRIES` (default
+  5000, `.env`-configurable) if it's now over. **Fixed-size ring buffer,
+  not an unbounded log** — per explicit direction: once at the cap, each
+  new entry evicts the single oldest one, one-in-one-out. Logging
+  failures are caught and logged, never thrown — an audit-log bug must
+  never be able to break checkout/edit/refund.
+- Deliberately a plain Mongo collection with app-level eviction, **not**
+  a native MongoDB *capped* collection — capped collections can't be
+  resized without dropping/recreating, and every other collection in
+  this app is plain + paginated in memory (`lib/query.js`); this stays
+  consistent with that instead of being a one-off exception.
+- Hooked into six mutation points, matching the spec's action list
+  exactly (see "Known gap" below for what's intentionally not covered
+  yet):
+  - `POST /billing/orderDetails` → `order.created` (inside the existing
+    commit transaction, same session)
+  - `POST /api/order/:orderID/edit` → `order.edited` (inside the
+    existing edit transaction)
+  - `POST /api/order/:orderID/refund` → `order.refunded` (inside the
+    existing refund transaction)
+  - `POST /api/product` → `product.created` or `product.updated`
+    (whichever applies; not wrapped in a transaction, matching the
+    route's existing lack of one)
+  - `POST /customer/updateCustomer` → `customer.updated`
+  - `POST /api/supplier` → `supplier.created` or `supplier.updated`
+- New `GET /api/audit-log` — `requireAuth` + `requireAdmin`, reuses
+  Stage 8's `escapeRegex`/`parsePagination`/`sortAndPaginate` pattern
+  (search over actor username / action / targetId, filter by exact
+  `action`, sort/paginate in memory over the matched set — same approach
+  as every other list route, see `lib/query.js`'s note on why).
+- New frontend page `AuditLog.jsx`: search box, action-type filter,
+  sortable/paginated table, click a row to expand before/after JSON
+  side-by-side. New `AdminRoute.jsx` wraps `ProtectedRoute`'s job and
+  adds a role check — a cashier hitting `/audit-log` is bounced to
+  `/dashboard` (backend `requireAdmin` is the real boundary; this is a
+  UX nicety). Sidebar link is admin-only, appended separately from the
+  shared `links` array so cashiers don't see it at all, not even
+  disabled/greyed-out.
+- Known gap: only the six mutation points above write an audit entry.
+  Product/customer deletes and undos (`DELETE /product/:productID`,
+  `POST /product/undo`, `POST /customer/deleteCustomer`,
+  `POST /customer/undoCustomer`), supplier deletes
+  (`DELETE /supplier/:supplierName`), and supplier purchases
+  (`POST /supplier/purchase`) do **not** currently log — the spec's
+  action list only named the six above (`order.created/edited/refunded`,
+  `product.created/updated`, `customer.updated`,
+  `supplier.created/updated`); flagging this now rather than silently
+  expanding scope to guess at the rest.
+
+### Stage 14 Verification
+
+- `node --check` passes on `main.js`, `lib/auditLog.js`,
+  `models/AuditLog.js`.
+- Frontend `npm run build` and `npm run lint` (oxlint) both pass, 0
+  errors — same pre-existing `AuthContext.jsx` warning as prior stages,
+  unrelated to this change.
+- Boot-tested live (no DB, same sandbox limitation as Stage 12):
+  `GET /api/audit-log` correctly 401s with no token and correctly 403s
+  with a valid non-admin (cashier-role) token — confirms both the auth
+  gate and the `requireAdmin` role gate are live before any DB call runs.
+  Regression-checked the Stage 12 routes (`/api/products`,
+  `/auth/refresh`) still 401 correctly, unaffected by this change.
+- The FIFO cap/eviction logic in `lib/auditLog.js` was unit-tested in
+  isolation against a mocked `AuditLog` model (no live Mongo): 8 writes
+  with `AUDIT_LOG_MAX_ENTRIES=5` left exactly the 5 most recent entries,
+  oldest evicted one at a time as expected — confirms the eviction math
+  itself is correct independent of the DB layer.
+- Not verified: the six `logAudit()` call sites' actual behavior against
+  a live order commit/edit/refund/product/customer/supplier save (no
+  MongoDB replica set available in this sandbox — same limitation noted
+  in Stage 12/13). Each call site was code-reviewed against the real
+  route logic (correct `before`/`after` snapshot timing, correct session
+  threading for the three transactional routes) but not observed firing
+  live. The `GET /api/audit-log` query/search/sort/pagination logic is
+  code-reviewed only, following the same already-verified pattern used
+  by Products/Customers/Orders/Suppliers, not independently live-tested.
 
 ## Stage Numbering Note
 
