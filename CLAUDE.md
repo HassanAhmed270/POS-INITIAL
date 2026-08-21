@@ -116,6 +116,11 @@ the old token.
   reduced form — `AdminRoute` is for the rarer case of a screen that's
   admin-only outright. Either way, the backend route's own `requireAdmin`
   is the real boundary; frontend gating is UX only.
+  `components/LowStockBell.jsx` (Stage 15) is the same pattern applied to
+  a header widget rather than a route: rendered from `Topbar.jsx` only
+  when `isAdmin`, polls `GET /api/products/low-stock` on mount + every
+  60s. The backend route's own `requireAdmin` is what actually stops a
+  cashier from reading it directly.
 - **`middleware/`** — `auth.js` (`requireAuth`/`requireAdmin`, JWT),
   `errorHandler.js` (`asyncHandler` wrapper + centralized error middleware).
 
@@ -132,7 +137,8 @@ the old token.
    `requireAuth`) are `POST /auth/login` and `POST /billing/orderid`;
    everything else — including `GET /dashboard/load`, `GET /api/products`
    and `GET /api/customers`, which were public through Stage 11/EJS-removal
-   — now requires a valid Bearer token.
+   — now requires a valid Bearer token. `GET /api/products/low-stock`
+   (Stage 15) additionally requires `requireAdmin`.
 4. Any GET request that didn't match one of the above and isn't under
    `/api` or `/auth` → served `frontend/dist/index.html` (or a static
    asset from `frontend/dist` if the path matches one). React Router picks

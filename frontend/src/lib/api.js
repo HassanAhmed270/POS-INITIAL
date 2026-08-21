@@ -50,6 +50,9 @@ export const api = {
 
   // Products
   getProducts: (params = {}) => request(`/api/products?${new URLSearchParams(params)}`),
+  // Stage 15 — admin-only, unpaginated: every product at-or-below its
+  // lowStockThreshold, for the header notification bell.
+  getLowStockProducts: () => request('/api/products/low-stock'),
   saveProduct: (payload) => request('/api/product', { method: 'POST', body: JSON.stringify(payload) }),
   undoProduct: (payload) => request('/product/undo', { method: 'POST', body: JSON.stringify(payload) }),
   deleteProduct: (productId) => request(`/product/${encodeURIComponent(productId)}`, { method: 'DELETE' }),

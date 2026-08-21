@@ -156,6 +156,32 @@ app.get('/api/products', requireAuth, asyncHandler(async (req, res) => {
   res.json({ success: true, products, total, page, limit });
 }));
 
+// Stage 15 — Low-Stock Notifications. Admin-only: returns every product
+// currently at-or-below its lowStockThreshold, unpaginated (this feeds a
+// header bell/badge, not a browsable list — Products.jsx already has the
+// paginated view with the same per-row highlighting). Sorted so the most
+// depleted stock (lowest available) surfaces first.
+app.get('/api/products/low-stock', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  const data = await Product.find(
+    {},
+    'productID productName category quantity reserved lowStockThreshold'
+  );
+  const products = data
+    .map((p) => ({
+      productID: p.productID,
+      productName: p.productName,
+      category: p.category,
+      quantity: p.quantity,
+      reserved: p.reserved,
+      available: p.quantity - p.reserved,
+      lowStockThreshold: p.lowStockThreshold,
+    }))
+    .filter((p) => p.available <= p.lowStockThreshold)
+    .sort((a, b) => a.available - b.available || a.productID.localeCompare(b.productID));
+
+  res.json({ success: true, count: products.length, products });
+}));
+
 app.get('/api/customers', requireAuth, asyncHandler(async (req, res) => {
   const { search = '', sortBy = 'customerName', sortDir = 'asc' } = req.query;
   const { page, limit } = parsePagination(req.query);

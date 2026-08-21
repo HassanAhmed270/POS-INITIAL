@@ -154,7 +154,39 @@ correctly; FIFO eviction unit-tested against a mocked model (8 writes,
 cap=5 → exactly the 5 most recent survive). **Not verified:** DB paths
 past the auth gate (sandbox limitation, see Stage 12).
 
-## Route Inventory — End of Stage 14
+## Stage 15 — Low-Stock Notifications (Admin-only)
+
+In-app only (browser push flagged as a follow-up, per spec — needs a
+service worker/HTTPS/permission prompt, bigger lift than scoped here).
+
+New `GET /api/products/low-stock` (`requireAuth`+`requireAdmin`),
+unpaginated: every product currently at-or-below `lowStockThreshold`
+(`available = quantity - reserved`), sorted most-depleted first. Reuses
+the same `available`/`lowStock` shape `GET /api/products` already
+computes — no new model/schema. New frontend `LowStockBell.jsx`: bell +
+badge count in `Topbar.jsx` (admin-only, same convention as Stage 14's
+Audit Log link), checked on mount and every 60s, dropdown lists affected
+products (name, ID, available/threshold) with the same red highlight
+Products.jsx already uses, links through to `/products`. Cashiers never
+see the bell at all (frontend gate) and the backend route 403s them
+directly if called (real boundary).
+
+**Verified:** `node --check` on `main.js`; live boot test —
+`GET /api/products/low-stock` 401 with no token, 403 ("Admins only.")
+with a cashier token, reaches the DB query correctly with an admin token
+(times out past that point — no local MongoDB replica set in this
+sandbox, same limitation as every stage since 12); regression-checked
+`/api/products`, `/dashboard/load`, `/api/audit-log` still 401 with no
+token. Frontend: `npm run build` and `npm run lint` both clean (one
+pre-existing unrelated warning in `AuthContext.jsx`); boot-tested the
+server serving the built `frontend/dist` — `/`, `/products` (SPA route)
+→ 200, unknown `/api/*` → JSON 404. **Not verified:** the actual DB
+query result / dropdown contents against live data (sandbox limitation,
+see Stage 12) — the query itself is a straightforward `find()` + filter
+matching `GET /api/products`'s already-verified `available`/`lowStock`
+logic, not new aggregation.
+
+## Route Inventory — End of Stage 15
 
 **Public:** `POST /auth/login`, `POST /billing/orderid`
 **Authenticated:** `POST /auth/refresh`, `GET /api/products`,
@@ -165,7 +197,7 @@ mutation routes, billing reserve/release/draft/order routes,
 **Authenticated + Admin:** `POST /billing/update`,
 `POST /api/order/:orderID/edit`, `POST /api/order/:orderID/refund`,
 `GET /api/sync/conflicts`, `POST /api/sync/conflicts/:id/resolve`,
-`GET /api/audit-log`
+`GET /api/audit-log`, `GET /api/products/low-stock` (Stage 15)
 **Frontend:** unmatched GET outside `/api`/`/auth` → `index.html`; React
 Router owns `/`, `/dashboard`, `/billing`, `/products`, `/customers`,
 `/suppliers`, `/orders`, `/reports`, `/audit-log` (admin-only). Unmatched
@@ -186,13 +218,16 @@ supports `range=week|month|year`. Exports: `summary`, `sales`, `refunds`,
 
 ## Current Status
 
-Stages 1–14 implemented. Stage 11 **end-to-end verified in a real
-browser + database**. Stages 1–10/12–14 verified by
+Stages 1–15 implemented. Stage 11 **end-to-end verified in a real
+browser + database**. Stages 1–10/12–15 verified by
 build/lint/`node --check`/boot-test/unit-test per stage above — DB paths
 past the auth gate are code-reviewed only (no replica set in this
 sandbox). EJS removal complete and verified. Remaining items are
 deliberate scope limitations and security/stress-testing follow-ups
 unless a new spec adds scope.
+
+Stage 15's browser push follow-up (real OS-level alerts) remains an
+explicitly deferred stretch goal, not scheduled.
 
 ## Stage Numbering Note
 
