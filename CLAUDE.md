@@ -174,6 +174,23 @@ works; `main.js` logs a warning at boot and there's just no UI to serve.
   `POST /billing/orderDetails` (commit) reads *that*, not anything sent in
   the request body — re-verifying price/discount against current DB values
   before committing stock and creating the `Order`.
+- **Two receipt layouts, one commit path (Stage 17)**: `Billing.jsx` has
+  `printReceiptFor` (the original plain-table layout) and
+  `printSpecialReceiptFor` (catering-invoice-style layout, added Stage
+  17 once a reference pattern was supplied) — both build an HTML string
+  from the same in-memory cart/total/payment state and hand it to the
+  same `printReceipt()` popup (`lib/print.js`, untouched). `handleGenerateBill`
+  takes a `special` boolean and picks which one to call *after* the order
+  actually commits — there is one validation/commit/offline-fallback path,
+  not two, so a new layout is just another render function, never a new
+  way to save an order. The Special Bill button opens an on-screen JSX
+  preview (mirroring `printSpecialReceiptFor`'s HTML) before anything is
+  committed; its own "Generate Bill" button re-enters the same
+  `handleGenerateBill(true)` call as the main flow. Customer mobile/
+  address/email on that layout come from `customerDirectory`, a
+  name-keyed lookup built from the same `GET /api/customers` response
+  Billing already fetches for its dropdown (previously only the name was
+  kept) — no new endpoint, no new schema field.
 - **Price is a history array, not a scalar** — always read it via
   `getLatestSellingPrice(product)` / `getLatestBuyingPrice(product)`
   (`lib/pricing.js`), never `product.sellingPriceHistory[0].price` or

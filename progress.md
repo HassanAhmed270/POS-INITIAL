@@ -258,6 +258,66 @@ breakpoints, not a rendered-pixel check. Recommend a quick manual pass in
 a real browser (or its responsive-mode devtools) before calling this
 stage fully closed, particularly on Billing given its density.
 
+## Stage 17 — Special Bill (Alternate Receipt Layout)
+
+Scoped from a supplied catering-invoice reference image once it arrived
+(this stage was blocked on that — see prior entry). Turned out to be a
+different ask than the original Stage 17 framing ("swap the print popup
+for a real generated PDF") — instead: a **second, selectable receipt
+layout**, previewed before commit, both still going through the existing
+`window.open()` print flow (`lib/print.js` untouched).
+
+Billing.jsx now has two buttons at the payment step: **Generate Bill**
+(unchanged — original plain-table receipt) and **🧾 Special Bill**, which
+opens an on-screen preview modal styled after the reference image
+(double border, "INVOICE" title, BILLED TO / ORDER INFO two-box header,
+Quantity/Description/Price/Amount table, Grand Total, italic "Thanks"
+footer) before anything is committed. The modal's own "Generate Bill"
+button then runs the exact same commit path as the normal button
+(`saveDraftNow` → `api.saveOrder`, same validation, same Stage 11
+offline-queue fallback) and prints using the special layout instead of
+the default one — `handleGenerateBill` took a `special` flag rather than
+becoming two separate functions, so there is one commit path, not two.
+
+**No new fields anywhere** — every value on the Special Bill layout
+already existed: Bill ID, order date, cashier (`username`), payment
+method, cart line items, and Grand Total/Paid/Balance are the same as the
+default receipt; customer mobile/address/email are real `Customer`
+document fields already returned by `GET /api/customers` (Stage 8) —
+Billing previously only kept the customer *name* from that response for
+its dropdown and discarded the rest, so a `customerDirectory` lookup
+(name → {mobileNo, email, address}) was added to keep what the API
+already sends, not to add new data. The reference template's Ship To,
+Delivery Date/Terms/People/Delivery Time, and company-logo/address boxes
+were dropped entirely — no such fields exist anywhere in this app's
+schema, and the ask was explicit that none should be added.
+
+**Verified:** `npm run build` and `npm run lint` clean (frontend) — same
+one pre-existing unrelated `AuthContext.jsx` warning as every prior
+stage, no new ones. Live boot test of the server serving the built
+`frontend/dist` (no MongoDB in this sandbox): `/` → 200, `/billing` (SPA
+route) → 200, `GET /api/products` and `GET /api/customers` (regression
+check, unrelated to this stage's change) → 401 with no token, all
+unchanged. **Not verified:** no live MongoDB replica set or real browser
+in this sandbox — the actual print popup output, the on-screen preview
+modal's rendering, and a real order commit through either button path
+are code-reviewed only, not exercised end-to-end. Recommend a manual
+pass (place a real cart, try both buttons, confirm the print dialog
+layout matches) before treating this as fully closed.
+
+**Addendum — logo:** both the printed HTML and the on-screen preview
+modal now reference `frontend/public/logo.png` (top of the invoice,
+above the "INVOICE" title) — the person's shop logo, dropped into
+`frontend/public/` by them, not something this app generates or stores.
+The printed popup uses an absolute URL (`window.location.origin +
+'/logo.png'`) since it's a blank window with no base URL of its own to
+resolve a relative path against; the on-screen preview uses a normal
+relative `/logo.png` (served from the app's own origin either way). Both
+fail gracefully (`onerror`/`onError` hides the `<img>`) if the file isn't
+present yet, so this doesn't break anything before the logo is actually
+added. Not verified with a real file in this sandbox — only that the
+markup builds clean and degrades safely without one.
+
 ## Route Inventory — End of Stage 15
 
 **Public:** `POST /auth/login`, `POST /billing/orderid`
@@ -290,16 +350,17 @@ supports `range=week|month|year`. Exports: `summary`, `sales`, `refunds`,
 
 ## Current Status
 
-Stages 1–16 implemented. Stage 11 **end-to-end verified in a real
-browser + database**. Stages 1–10/12–16 verified by
+Stages 1–17 implemented. Stage 11 **end-to-end verified in a real
+browser + database**. Stages 1–10/12–17 verified by
 build/lint/`node --check`/boot-test/unit-test per stage above — DB paths
 past the auth gate are code-reviewed only (no replica set in this
-sandbox), and Stage 16's responsive layout is code-reviewed against
-Tailwind breakpoints rather than checked in a real browser (no browser
-available in this sandbox either — see Stage 16 above). EJS removal
-complete and verified. Remaining items are deliberate scope limitations
-and security/stress-testing/manual-responsive-check follow-ups unless a
-new spec adds scope.
+sandbox), Stage 16's responsive layout and Stage 17's print/preview
+output are code-reviewed against Tailwind breakpoints / the reference
+image rather than checked in a real browser (no browser available in
+this sandbox either — see Stage 16/17 above). EJS removal complete and
+verified. Remaining items are deliberate scope limitations and
+security/stress-testing/manual-check follow-ups unless a new spec adds
+scope.
 
 Stage 15's browser push follow-up (real OS-level alerts) remains an
 explicitly deferred stretch goal, not scheduled.

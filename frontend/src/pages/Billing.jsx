@@ -16,6 +16,12 @@ export default function Billing() {
 
   const [products, setProducts] = useState([]);
   const [customers, setCustomers] = useState([]);
+  // Stage 17 — Special Bill needs more than the bare name the dropdown
+  // uses (mobile/address/email), but that data already exists on the
+  // Customer document (GET /api/customers already returns it) — this is
+  // just a lookup kept alongside the name list, not a new field or a new
+  // request. Keyed by customerName.
+  const [customerDirectory, setCustomerDirectory] = useState({});
   const [error, setError] = useState('');
 
   const [search, setSearch] = useState('');
@@ -34,6 +40,11 @@ export default function Billing() {
   const [billId, setBillId] = useState(null);
   const [paid, setPaid] = useState('');
   const [paymentMethod, setPaymentMethod] = useState('cash');
+  // Stage 17 — Special Bill (catering-invoice-style layout). Purely a
+  // second presentation of the exact same draft/order data — no new
+  // fields, no separate commit path. `false` = closed, `true` = preview
+  // open (nothing committed yet).
+  const [showSpecialPreview, setShowSpecialPreview] = useState(false);
 
   // Stage 11 — offline sync. `isOnline` mirrors the browser's own signal;
   // it's the fast/local half of "are we connected" (an actual failed
@@ -103,7 +114,17 @@ export default function Billing() {
       try {
         await Promise.all([
           loadProducts(),
-          api.getCustomers().then((c) => setCustomers((c.customers || []).map((row) => row.customerName))),
+          api.getCustomers().then((c) => {
+            const rows = c.customers || [];
+            setCustomers(rows.map((row) => row.customerName));
+            setCustomerDirectory(
+              Object.fromEntries(rows.map((row) => [row.customerName, {
+                mobileNo: row.mobileNo || '',
+                email: row.email || '',
+                address: row.address || '',
+              }]))
+            );
+          }),
         ]);
       } catch (err) {
         setError(err.message || 'Failed to load billing data');
@@ -458,7 +479,67 @@ export default function Billing() {
     printReceipt(html);
   };
 
-  const handleGenerateBill = async () => {
+  // Stage 17 — Special Bill: same data as printReceiptFor, laid out to
+  // match the catering-invoice-style pattern provided for this stage
+  // (title block, Billed To box, Order Info box, a plainer Qty/
+  // Description/Price/Amount table, grand total, thank-you footer).
+  // Deliberately drops nothing from the DB it doesn't have — no
+  // company/logo/ship-to/delivery-time fields exist anywhere in this
+  // app, so those boxes from the reference template are simply omitted
+  // rather than faked.
+  const printSpecialReceiptFor = (total, paidNum, offline = false) => {
+    const details = customerDirectory[customer] || {};
+    const rows = Object.entries(billingItems)
+      .map(([, item]) => {
+        const subtotal = item.unitPrice * item.quantity;
+        const net = roundMoney(subtotal - subtotal * (item.discount / 100));
+        return `<tr><td>${item.quantity}</td><td>${item.itemName} (${item.productCode})</td><td>${formatMoney(item.unitPrice)}</td><td>${formatMoney(net)}</td></tr>`;
+      })
+      .join('');
+
+    const html = `
+      <div style="border:3px double #0f6674;padding:18px;">
+        <img src="${window.location.origin}/logo.png" alt="" style="display:block;margin:0 auto 8px;max-height:60px;" onerror="this.style.display='none'" />
+        <h1 style="text-align:center;color:#0f6674;font-size:22px;letter-spacing:1px;margin:0 0 16px;">INVOICE</h1>
+        ${offline ? '<div style="margin:0 0 12px;font-weight:700;color:#b45309;text-align:center;">OFFLINE — PENDING SYNC (not yet confirmed)</div>' : ''}
+
+        <table style="margin-bottom:0;">
+          <tr>
+            <td style="width:50%;background:#f6dede;font-weight:700;color:#0f6674;">BILLED TO</td>
+            <td style="width:50%;background:#f6dede;font-weight:700;color:#0f6674;">ORDER INFO</td>
+          </tr>
+          <tr>
+            <td style="vertical-align:top;">
+              ${customer}<br/>
+              ${details.mobileNo ? details.mobileNo + '<br/>' : ''}
+              ${details.address ? details.address + '<br/>' : ''}
+              ${details.email ? details.email : ''}
+            </td>
+            <td style="vertical-align:top;">
+              Invoice No: ${billId}<br/>
+              Date: ${new Date().toLocaleString()}<br/>
+              Served by: ${username}<br/>
+              Payment: ${paymentMethod}
+            </td>
+          </tr>
+        </table>
+
+        <table style="margin-top:12px;">
+          <thead><tr style="background:#f6dede;color:#0f6674;"><th>Quantity</th><th>Description</th><th>Price of Each Item</th><th>Amount</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+
+        <div class="totals"><span>Grand Total</span><span>${formatMoney(total)}</span></div>
+        <div class="totals"><span>Paid</span><span>${formatMoney(paidNum)}</span></div>
+        <div class="totals"><span>${paidNum >= total ? 'Change' : 'Balance Due (Credit)'}</span><span>${formatMoney(Math.abs(paidNum - total))}</span></div>
+
+        <p style="text-align:center;color:#0f6674;font-style:italic;margin-top:18px;">"Thanks"</p>
+      </div>
+    `;
+    printReceipt(html);
+  };
+
+  const handleGenerateBill = async (special = false) => {
     const total = grandTotal;
     const paidNum = parseFloat(paid) || 0;
     if (paidNum < 0) {
@@ -499,10 +580,11 @@ export default function Billing() {
         return;
       }
 
-      printReceiptFor(total, paidNum);
+      (special ? printSpecialReceiptFor : printReceiptFor)(total, paidNum);
       alert('Order saved successfully.');
       resetBill();
       setCustomer('unknown');
+      setShowSpecialPreview(false);
       await loadProducts();
     } catch (err) {
       // Stage 11: a genuine network failure — not a rejected order — is
@@ -530,10 +612,11 @@ export default function Billing() {
             paymentMethod,
             createdOfflineAt: new Date().toISOString(),
           });
-          printReceiptFor(total, paidNum, true);
+          (special ? printSpecialReceiptFor : printReceiptFor)(total, paidNum, true);
           alert('No connection — this bill has been saved on this device and will sync automatically once you\'re back online.');
           resetBill();
           setCustomer('unknown');
+          setShowSpecialPreview(false);
         } catch (queueErr) {
           alert('Could not save this bill, even offline: ' + queueErr.message);
         }
@@ -568,6 +651,7 @@ export default function Billing() {
       const data = await api.addCustomer({ customerName: cleanName, mobileNo, emergencyMobile, email, address });
       if (data.success) {
         setCustomers((prev) => [...prev, cleanName]);
+        setCustomerDirectory((prev) => ({ ...prev, [cleanName]: { mobileNo, email, address } }));
         setCustomer(cleanName);
         alert('New customer added successfully!');
       } else {
@@ -825,8 +909,24 @@ export default function Billing() {
                   </div>
                 </div>
 
-                <button onClick={handleGenerateBill} className="w-full py-2 bg-brand text-white rounded-lg shadow hover:bg-blue-700">
+                <button onClick={() => handleGenerateBill(false)} className="w-full py-2 bg-brand text-white rounded-lg shadow hover:bg-blue-700">
                   Generate Bill
+                </button>
+                <button
+                  onClick={() => {
+                    if (customer === 'unknown') {
+                      alert('Please select a customer before previewing the Special Bill.');
+                      return;
+                    }
+                    if (Object.keys(billingItems).length === 0) {
+                      alert('Add at least one item before previewing the Special Bill.');
+                      return;
+                    }
+                    setShowSpecialPreview(true);
+                  }}
+                  className="w-full py-2 border-2 border-brand text-brand rounded-lg hover:bg-brand hover:text-white"
+                >
+                  🧾 Special Bill
                 </button>
 
                 <div className="flex space-x-2">
@@ -909,6 +1009,93 @@ export default function Billing() {
                   </button>
                 </div>
               </form>
+            </div>
+          </div>
+        )}
+
+        {showSpecialPreview && (
+          <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-lg shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+              <div className="border-4 border-double border-[#0f6674] m-4 p-5">
+                <img src="/logo.png" alt="" className="block mx-auto mb-2 max-h-14" onError={(e) => { e.target.style.display = 'none'; }} />
+                <h1 className="text-center text-[#0f6674] text-2xl font-bold tracking-wide mb-4">INVOICE</h1>
+
+                <table className="w-full text-sm border-collapse">
+                  <tbody>
+                    <tr>
+                      <td className="bg-[#f6dede] font-bold text-[#0f6674] p-2 border w-1/2">BILLED TO</td>
+                      <td className="bg-[#f6dede] font-bold text-[#0f6674] p-2 border w-1/2">ORDER INFO</td>
+                    </tr>
+                    <tr>
+                      <td className="align-top p-2 border">
+                        {customer}<br />
+                        {customerDirectory[customer]?.mobileNo && <>{customerDirectory[customer].mobileNo}<br /></>}
+                        {customerDirectory[customer]?.address && <>{customerDirectory[customer].address}<br /></>}
+                        {customerDirectory[customer]?.email}
+                      </td>
+                      <td className="align-top p-2 border">
+                        Invoice No: {billId}<br />
+                        Date: {new Date().toLocaleString()}<br />
+                        Served by: {username}<br />
+                        Payment: {paymentMethod}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+
+                <table className="w-full text-sm border-collapse mt-3">
+                  <thead>
+                    <tr className="bg-[#f6dede] text-[#0f6674]">
+                      <th className="p-2 border text-left">Quantity</th>
+                      <th className="p-2 border text-left">Description</th>
+                      <th className="p-2 border text-left">Price of Each Item</th>
+                      <th className="p-2 border text-left">Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Object.entries(billingItems).map(([key, item]) => {
+                      const subtotal = item.unitPrice * item.quantity;
+                      const net = roundMoney(subtotal - subtotal * (item.discount / 100));
+                      return (
+                        <tr key={key}>
+                          <td className="p-2 border">{item.quantity}</td>
+                          <td className="p-2 border">{item.itemName} ({item.productCode})</td>
+                          <td className="p-2 border">{formatMoney(item.unitPrice)}</td>
+                          <td className="p-2 border">{formatMoney(net)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+
+                <div className="flex justify-between font-bold text-sm mt-3 pt-2 border-t">
+                  <span>Grand Total</span><span>{formatMoney(grandTotal)}</span>
+                </div>
+                <div className="flex justify-between text-sm mt-1">
+                  <span>Paid</span><span>{formatMoney(parseFloat(paid) || 0)}</span>
+                </div>
+                <div className={`flex justify-between text-sm font-semibold mt-1 ${balance < 0 ? 'text-red-600' : 'text-green-600'}`}>
+                  <span>{balance < 0 ? 'Balance Due (Credit)' : 'Change'}</span>
+                  <span>{formatMoney(Math.abs(balance))}</span>
+                </div>
+
+                <p className="text-center text-[#0f6674] italic mt-4">"Thanks"</p>
+              </div>
+
+              <div className="flex gap-2 p-4 pt-0">
+                <button
+                  onClick={() => handleGenerateBill(true)}
+                  className="w-1/2 py-2 bg-brand text-white rounded-lg shadow hover:bg-blue-700"
+                >
+                  Generate Bill
+                </button>
+                <button
+                  onClick={() => setShowSpecialPreview(false)}
+                  className="w-1/2 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300"
+                >
+                  Cancel
+                </button>
+              </div>
             </div>
           </div>
         )}
