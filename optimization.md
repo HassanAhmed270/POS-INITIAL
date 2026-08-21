@@ -97,7 +97,7 @@ Currently receipts are a plain `window.open()` print popup (`frontend/src/lib/pr
 **Exit criteria:** not yet defined — depends on the provided pattern. Revisit this stage once it arrives.
 
 ---
-
+<!-- Skipp
 ## Stage 18 — Desktop Distribution: Local Frontend + Hosted Backend
 
 *Depends on Stage 11 (offline sync) — this is what makes offline sync go from "nice to have for flaky wifi" to "the normal operating mode," since the whole point is a local desktop app talking to a backend that isn't on the same network.*
@@ -116,7 +116,7 @@ The ask: the frontend should be runnable as a local desktop executable (no hosti
 
 **Exit criteria:** the packaged desktop app runs on a machine with no local Node/Express/MongoDB installed at all, talks to the hosted backend when reachable, keeps working (queuing sales) when it isn't, and syncs cleanly when connectivity returns.
 
----
+--- -->
 
 ## Stage 19 — Worker Permissions & Walk-in / Unknown Customers
 
