@@ -149,21 +149,21 @@ export default function Suppliers() {
       <Sidebar />
       <main className="flex-1 flex flex-col overflow-hidden">
         <Topbar title="Supplier Management" />
-        <div className="p-6 overflow-y-auto flex-1 space-y-6">
+        <div className="p-4 md:p-6 overflow-y-auto flex-1 space-y-6">
           <input
             type="text"
             placeholder="Search suppliers..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="border rounded px-3 py-2 w-64"
+            className="border rounded px-3 py-2 w-full sm:w-64"
           />
 
           {error && <p className="text-red-600 text-sm">{error}</p>}
 
           <div className="bg-white border rounded-lg w-full">
-            <div className="flex">
-              <div className="w-2/3 flex flex-col">
-                <table className="w-full text-sm">
+            <div className="flex flex-col lg:flex-row">
+              <div className="w-full lg:w-2/3 flex flex-col overflow-x-auto">
+                <table className="w-full min-w-[640px] text-sm">
                   <thead>
                     <tr className="border-b bg-gray-100">
                       <SortableHeader label="Supplier" field="supplierName" sortBy={sortBy} sortDir={sortDir} onSort={handleSort} />
@@ -210,7 +210,7 @@ export default function Suppliers() {
                                 {s.purchases.length === 0 ? (
                                   <p className="text-xs text-gray-400">No purchases recorded yet.</p>
                                 ) : (
-                                  <table className="w-full text-xs bg-white border-collapse">
+                                  <table className="w-full min-w-[520px] text-xs bg-white border-collapse">
                                     <thead className="bg-gray-100">
                                       <tr>
                                         <th className="p-1 text-left border">Purchase ID</th>
@@ -246,7 +246,7 @@ export default function Suppliers() {
                 <Pagination page={page} limit={PAGE_SIZE} total={total} onPageChange={setPage} />
               </div>
 
-              <div className="w-1/3 p-6 border-l-4 border-gray-300 overflow-y-auto">
+              <div className="w-full lg:w-1/3 p-4 sm:p-6 border-t-4 lg:border-t-0 lg:border-l-4 border-gray-300 lg:overflow-y-auto">
                 <h2 className="text-xl flex justify-center text-blue-600 font-bold mb-4">Add Supplier</h2>
                 <form onSubmit={handleAddSupplier} className="space-y-3 text-sm">
                   <input

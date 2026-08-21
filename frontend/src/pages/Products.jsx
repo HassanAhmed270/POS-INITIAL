@@ -152,24 +152,24 @@ export default function Products() {
       <Sidebar />
       <main className="flex-1 flex flex-col overflow-hidden">
         <Topbar title="Product Management" />
-        <div className="p-6 overflow-y-auto flex-1">
+        <div className="p-4 md:p-6 overflow-y-auto flex-1">
           <div className="flex justify-between items-center mb-6">
             <input
               type="text"
               placeholder="Search products..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="border rounded px-3 py-2 w-64"
+              className="border rounded px-3 py-2 w-full sm:w-64"
             />
           </div>
 
           {error && <p className="text-red-600 text-sm mb-4">{error}</p>}
 
           <div className="bg-white border rounded-lg w-full">
-            <div className="flex h-[560px]">
-              <div className="w-2/3 flex flex-col">
-                <div className="overflow-y-auto px-4 flex-1">
-                  <table className="w-full text-sm">
+            <div className="flex flex-col lg:flex-row lg:h-[560px]">
+              <div className="w-full lg:w-2/3 flex flex-col">
+                <div className="overflow-x-auto lg:overflow-y-auto px-4 flex-1">
+                  <table className="w-full min-w-[640px] text-sm">
                     <thead>
                       <tr className="border-b bg-gray-100">
                         <SortableHeader label="Product ID" field="productID" sortBy={sortBy} sortDir={sortDir} onSort={handleSort} />
@@ -217,7 +217,7 @@ export default function Products() {
                 <Pagination page={page} limit={PAGE_SIZE} total={total} onPageChange={setPage} />
               </div>
 
-              <div className="w-1/3 p-8 border-l-4 border-gray-300 overflow-y-auto">
+              <div className="w-full lg:w-1/3 p-4 sm:p-8 border-t-4 lg:border-t-0 lg:border-l-4 border-gray-300 lg:overflow-y-auto">
                 <h2 className="text-2xl flex justify-center text-green-600 font-bold mb-4">
                   {mode === 'add' ? 'Add New Product' : 'Update Product'}
                 </h2>

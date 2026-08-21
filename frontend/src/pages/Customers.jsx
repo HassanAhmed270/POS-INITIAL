@@ -165,17 +165,17 @@ export default function Customers() {
                 placeholder="Search customers..."
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                className="border rounded-md px-3 py-2 w-64"
+                className="border rounded-md px-3 py-2 w-full sm:w-64"
               />
             </div>
 
             {error && <p className="text-red-600 text-sm px-4">{error}</p>}
 
             <div className="bg-white border rounded-lg w-full p-2">
-              <div className="flex h-[560px]">
-                <div className="w-2/3 flex flex-col">
-                  <div className="overflow-y-auto px-4 flex-1">
-                    <table className="w-full text-sm">
+              <div className="flex flex-col lg:flex-row lg:h-[560px]">
+                <div className="w-full lg:w-2/3 flex flex-col">
+                  <div className="overflow-x-auto lg:overflow-y-auto px-4 flex-1">
+                    <table className="w-full min-w-[780px] text-sm">
                       <thead>
                         <tr className="border-b bg-gray-100">
                           <SortableHeader label="Name" field="customerName" sortBy={sortBy} sortDir={sortDir} onSort={handleSort} />
@@ -219,7 +219,7 @@ export default function Customers() {
                   <Pagination page={page} limit={PAGE_SIZE} total={total} onPageChange={setPage} />
                 </div>
 
-                <div className="w-1/3 px-10 py-6 border-l-4 border-gray-300 overflow-y-auto">
+                <div className="w-full lg:w-1/3 px-4 sm:px-10 py-6 border-t-4 lg:border-t-0 lg:border-l-4 border-gray-300 lg:overflow-y-auto">
                   <h2 className={`text-2xl flex justify-center font-bold mb-2 ${mode === 'add' ? 'text-blue-600' : 'text-yellow-600'}`}>
                     {mode === 'add' ? 'Add New Customer' : 'Update Customer'}
                   </h2>

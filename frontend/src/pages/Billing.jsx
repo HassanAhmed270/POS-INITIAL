@@ -584,14 +584,14 @@ export default function Billing() {
   return (
     <div className="flex h-screen">
       <Sidebar />
-      <main className="flex-1 p-6 overflow-y-auto relative">
+      <main className="flex-1 pl-14 pr-4 py-4 md:p-6 overflow-y-auto relative">
         <div className="space-y-6">
-          <div className="flex items-center justify-between border-b pb-3">
-            <h1 className="text-3xl md:text-4xl font-bold text-brand">Creating Invoice</h1>
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-3">
+            <h1 className="text-2xl sm:text-3xl md:text-4xl font-bold text-brand">Creating Invoice</h1>
             <select
               value={showCustomerForm ? 'New Customer' : customer}
               onChange={(e) => handleCustomerSelect(e.target.value)}
-              className="border border-gray-300 rounded-lg px-3 py-2 w-52 focus:ring-2 focus:ring-brand focus:outline-none"
+              className="border border-gray-300 rounded-lg px-3 py-2 w-full sm:w-52 focus:ring-2 focus:ring-brand focus:outline-none"
             >
               <option value="unknown">Select Customer</option>
               {customers.map((name) => (
@@ -610,8 +610,8 @@ export default function Billing() {
             </div>
           )}
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 h-[600px]">
-            <div className="md:col-span-2 bg-white rounded-lg shadow p-4 overflow-y-auto">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 md:h-[600px]">
+            <div className="md:col-span-2 bg-white rounded-lg shadow p-4 md:overflow-y-auto">
               <input
                 type="text"
                 placeholder="Search Products"
@@ -619,7 +619,8 @@ export default function Billing() {
                 onChange={(e) => setSearch(e.target.value)}
                 className="border border-gray-300 rounded-lg px-3 py-2 w-full mb-3 focus:ring-2 focus:ring-brand focus:outline-none"
               />
-              <table className="w-full text-sm border border-gray-200 rounded-lg overflow-hidden">
+              <div className="overflow-x-auto">
+              <table className="w-full min-w-[560px] text-sm border border-gray-200 rounded-lg overflow-hidden">
                 <thead className="bg-brand text-white">
                   <tr>
                     <th className="text-left p-2">Code</th>
@@ -656,10 +657,11 @@ export default function Billing() {
                   )}
                 </tbody>
               </table>
+              </div>
             </div>
 
             {view === 'add' ? (
-              <div className="overflow-y-auto bg-white rounded-lg shadow p-4 space-y-3">
+              <div className="md:overflow-y-auto bg-white rounded-lg shadow p-4 space-y-3">
                 <div className="flex justify-between items-center mb-4">
                   <h3 className="font-medium text-lg text-brand">Add Product</h3>
                   {billId && <h3><b className="text-brand-green">Bill ID:</b> <span className="font-semibold text-lg">{billId}</span></h3>}
@@ -750,7 +752,7 @@ export default function Billing() {
                 </div>
               </div>
             ) : (
-              <div className="overflow-y-auto bg-white rounded-lg shadow p-4 space-y-3">
+              <div className="md:overflow-y-auto bg-white rounded-lg shadow p-4 space-y-3">
                 <div className="flex justify-between items-center">
                   <h3 className="font-medium text-lg text-brand">Bill Summary</h3>
                   <h3><b className="text-brand-green">Cashier:</b> <span className="font-semibold text-lg text-brand">{username}</span></h3>

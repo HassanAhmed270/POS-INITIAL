@@ -186,6 +186,78 @@ see Stage 12) — the query itself is a straightforward `find()` + filter
 matching `GET /api/products`'s already-verified `available`/`lowStock`
 logic, not new aggregation.
 
+## Stage 16 — Full Responsive Design Pass
+
+Frontend-only CSS/Tailwind pass, no backend/schema/route changes. Covers
+all 9 screens (Login, Dashboard, Billing, Products, Customers, Suppliers,
+Orders, Reports, Audit Log).
+
+**Sidebar** (`components/Sidebar.jsx`) rebuilt as a responsive drawer:
+below `md` it's a fixed, off-canvas panel toggled by a hamburger button
+(+ tap-to-close backdrop) that the component renders itself, so no page
+had to change its own markup to get it; at `md`+ it's unchanged —
+always-visible, in-flow, exactly as before Stage 16. Nav links close the
+drawer on click (mobile). `Topbar.jsx` reserves space for the hamburger
+(`pl-14` below `md`), wraps instead of overflowing at narrow widths, and
+hides the username label (keeps the avatar) below `sm`.
+
+**Billing** (highest-risk per spec — doesn't use Topbar, has its own
+header): added matching hamburger clearance, header now wraps, the
+`h-[600px]` three-panel grid only applies at `md`+ (stacks naturally
+below that), and the product-search table sits in its own
+`overflow-x-auto` with a `min-w-[560px]` floor instead of columns
+crushing unreadably.
+
+**Products / Customers / Suppliers** — all three share the same
+list+edit-form two-pane pattern; that pane split now stacks vertically
+through `lg` (list on top, form below, both full-width) and only goes
+side-by-side at `lg`+. Each list table got `overflow-x-auto` + a `min-w`
+floor (Products 640px, Customers 780px — 7 columns, Suppliers 640px, plus
+its nested purchase-history sub-table at 520px) rather than squishing
+columns. Search inputs go full-width below `sm`.
+
+**Orders** — table wrapped in `overflow-x-auto` + `min-w-[720px]`; the
+expanded per-order detail row was already a 1-col/2-col responsive grid
+and needed no change.
+
+**Dashboard** — stat-card grid changed from a `2 → 4` column jump to
+`1 → 2 → 4`, both report tables wrapped in `overflow-x-auto`, header
+wraps, padding scales down on mobile.
+
+**Reports** — header wraps, padding scales down; the export-card grid and
+offline-sync/conflict panel already used responsive patterns and needed
+no table/overflow fixes.
+
+**Audit Log** — already had `overflow-x-auto` from Stage 14; added a
+`min-w-[700px]` floor for consistency and matching mobile padding. The
+expandable before/after JSON `<pre>` blocks already scroll independently
+and needed no change.
+
+**Login** — fixed `w-96` card replaced with fluid `w-full max-w-sm/md`,
+heading sizes scale down below `sm`, page padding added so the card never
+touches the viewport edge; `h-screen` → `min-h-screen` so a very short
+viewport doesn't clip content.
+
+No new dependencies — existing Tailwind/`@tailwindcss/vite` setup
+handled all of it, matching the spec's expectation.
+
+**Verified:** `npm run build` and `npm run lint` clean (frontend) — same
+one pre-existing unrelated `AuthContext.jsx` warning as every prior
+stage, no new warnings/errors. Live boot test (server + built
+`frontend/dist`, no MongoDB in this sandbox): `/` → 200, `/products` (SPA
+route) → 200, `GET /api/products` no token → 401 (regression check,
+unaffected by this stage), unknown `/api/*` → clean JSON 404. Reviewed
+every touched screen's markup by hand at the mobile/tablet/small-laptop/
+wide-desktop breakpoints named in the spec, including nested elements
+(Orders' expanded detail row, Suppliers' purchase-history sub-table,
+Audit Log's before/after JSON panel) for scroll/stacking correctness.
+**Not verified:** no real browser in this sandbox to visually confirm
+against actual device viewports or to check touch-target sizing
+empirically — this was a code-level review against Tailwind's documented
+breakpoints, not a rendered-pixel check. Recommend a quick manual pass in
+a real browser (or its responsive-mode devtools) before calling this
+stage fully closed, particularly on Billing given its density.
+
 ## Route Inventory — End of Stage 15
 
 **Public:** `POST /auth/login`, `POST /billing/orderid`
@@ -218,13 +290,16 @@ supports `range=week|month|year`. Exports: `summary`, `sales`, `refunds`,
 
 ## Current Status
 
-Stages 1–15 implemented. Stage 11 **end-to-end verified in a real
-browser + database**. Stages 1–10/12–15 verified by
+Stages 1–16 implemented. Stage 11 **end-to-end verified in a real
+browser + database**. Stages 1–10/12–16 verified by
 build/lint/`node --check`/boot-test/unit-test per stage above — DB paths
 past the auth gate are code-reviewed only (no replica set in this
-sandbox). EJS removal complete and verified. Remaining items are
-deliberate scope limitations and security/stress-testing follow-ups
-unless a new spec adds scope.
+sandbox), and Stage 16's responsive layout is code-reviewed against
+Tailwind breakpoints rather than checked in a real browser (no browser
+available in this sandbox either — see Stage 16 above). EJS removal
+complete and verified. Remaining items are deliberate scope limitations
+and security/stress-testing/manual-responsive-check follow-ups unless a
+new spec adds scope.
 
 Stage 15's browser push follow-up (real OS-level alerts) remains an
 explicitly deferred stretch goal, not scheduled.

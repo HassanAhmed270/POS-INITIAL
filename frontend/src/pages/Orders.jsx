@@ -192,19 +192,19 @@ export default function Orders() {
       <Sidebar />
       <main className="flex-1 flex flex-col overflow-hidden">
         <Topbar title="Orders" />
-        <div className="p-6 overflow-y-auto flex-1">
+        <div className="p-4 md:p-6 overflow-y-auto flex-1">
           <input
             type="text"
             placeholder="Search by order ID or customer..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="border rounded px-3 py-2 w-72 mb-4"
+            className="border rounded px-3 py-2 w-full sm:w-72 mb-4"
           />
           {error && <p className="text-red-600 text-sm mb-4">{error}</p>}
           {!isAdmin && <p className="text-xs text-gray-500 mb-4">You're viewing orders read-only — editing and refunds are admin-only.</p>}
 
-          <div className="bg-white border rounded-lg w-full">
-            <table className="w-full text-sm">
+          <div className="bg-white border rounded-lg w-full overflow-x-auto">
+            <table className="w-full min-w-[720px] text-sm">
               <thead>
                 <tr className="border-b bg-gray-100">
                   <SortableHeader label="Order" field="orderID" sortBy={sortBy} sortDir={sortDir} onSort={handleSort} />

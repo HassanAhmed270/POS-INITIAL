@@ -121,6 +121,15 @@ the old token.
   when `isAdmin`, polls `GET /api/products/low-stock` on mount + every
   60s. The backend route's own `requireAdmin` is what actually stops a
   cashier from reading it directly.
+  `components/Sidebar.jsx` (Stage 16) is responsive on its own: below
+  `md` it renders as a fixed, off-canvas drawer with its own hamburger
+  button and backdrop; at `md`+ it's the original always-visible in-flow
+  column. Because the component owns its own responsive behavior, no
+  page had to change how it mounts `<Sidebar />` — every screen got the
+  drawer "for free." The one thing each page's own header/topbar *does*
+  need is `pl-14` (or equivalent) below `md` so its own content doesn't
+  sit under the fixed hamburger button — see `Topbar.jsx` or Billing's
+  own inline header for the pattern if adding a new screen.
 - **`middleware/`** — `auth.js` (`requireAuth`/`requireAdmin`, JWT),
   `errorHandler.js` (`asyncHandler` wrapper + centralized error middleware).
 

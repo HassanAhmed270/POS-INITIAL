@@ -43,10 +43,10 @@ export default function Reports() {
       <Sidebar />
       <div className="flex-1 flex flex-col">
         <Topbar title="Reports" />
-        <main className="p-6 space-y-6 overflow-y-auto">
-          <div className="flex items-center justify-between">
+        <main className="p-4 md:p-6 space-y-6 overflow-y-auto">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h2 className="text-3xl font-semibold text-brand">Export data</h2>
+              <h2 className="text-2xl sm:text-3xl font-semibold text-brand">Export data</h2>
               <p className="text-gray-600">Download CSV reports for sales, refunds, credit, and payables.</p>
             </div>
             <div className="flex gap-1 bg-gray-100 rounded-lg p-1">

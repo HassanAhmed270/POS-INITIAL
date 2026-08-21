@@ -98,7 +98,7 @@ export default function AuditLog() {
       <Sidebar />
       <div className="flex-1 flex flex-col overflow-hidden">
         <Topbar title="Audit Log" />
-        <main className="flex-1 overflow-y-auto p-6">
+        <main className="flex-1 overflow-y-auto p-4 md:p-6">
           <p className="text-sm text-gray-500 mb-4">
             A durable, read-only record of every order, product, customer, and supplier
             change — who did it and when. Kept to the most recent {' '}
@@ -129,7 +129,7 @@ export default function AuditLog() {
           {error && <p className="text-red-600 mb-3">{error}</p>}
 
           <div className="bg-white rounded shadow overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className="w-full min-w-[700px] text-sm">
               <thead className="bg-gray-100 text-gray-600 uppercase text-xs">
                 <tr>
                   <SortableHeader label="When" field="date" sortBy={sortBy} sortDir={sortDir} onSort={handleSort} />
