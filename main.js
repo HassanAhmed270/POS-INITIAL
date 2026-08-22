@@ -1005,6 +1005,18 @@ async function generateUniquePurchaseId() {
 // as a real-supplier purchase, just with supplierID: null. Because there's
 // no Supplier.purchases entry, a self-purchase won't show up in any
 // supplier's purchase-history table — it's not attached to one, by design.
+//
+// Stage 21: each item may *optionally* carry a `sellingPrice` alongside
+// its (required) `unitCost` — restocking is now allowed to update what
+// customers are charged, not just what the business paid. This is the
+// exact same "only record a history entry if the price actually moved"
+// rule POST /api/product already uses for sellingPriceHistory (see
+// below), so a restock that doesn't touch selling price is a no-op on
+// that array, and a restock that does is immediately what Billing/
+// Products/receipts see — same array, same getLatestSellingPrice()
+// reader, no separate "restock price" concept. buyingPriceHistory is
+// updated the same as before regardless; the two histories never touch
+// each other.
 app.post('/supplier/purchase', requireAuth, asyncHandler(async (req, res) => {
   const { supplierName, items, amountPaid } = req.body;
   const isSelfPurchase = supplierName === NO_SUPPLIER;
@@ -1025,6 +1037,13 @@ app.post('/supplier/purchase', requireAuth, asyncHandler(async (req, res) => {
     if (!Number.isFinite(Number(item.unitCost)) || Number(item.unitCost) < 0) {
       return res.status(400).json({ success: false, message: `Invalid unit cost for ${item.productID}.` });
     }
+    // sellingPrice is optional — omit/blank means "don't touch the
+    // selling price this restock", not "set it to zero". Only validate
+    // when something was actually submitted.
+    const hasSellingPrice = item.sellingPrice !== undefined && item.sellingPrice !== null && item.sellingPrice !== '';
+    if (hasSellingPrice && (!Number.isFinite(Number(item.sellingPrice)) || Number(item.sellingPrice) < 0)) {
+      return res.status(400).json({ success: false, message: `Invalid selling price for ${item.productID}.` });
+    }
   }
 
   let supplier = null;
@@ -1035,11 +1054,18 @@ app.post('/supplier/purchase', requireAuth, asyncHandler(async (req, res) => {
     }
   }
 
-  const cleanItems = items.map((it) => ({
-    productID: it.productID,
-    quantity: parseInt(it.quantity),
-    unitCost: roundMoney(it.unitCost),
-  }));
+  const cleanItems = items.map((it) => {
+    const hasSellingPrice = it.sellingPrice !== undefined && it.sellingPrice !== null && it.sellingPrice !== '';
+    return {
+      productID: it.productID,
+      quantity: parseInt(it.quantity),
+      unitCost: roundMoney(it.unitCost),
+      // Kept off the object entirely (not just undefined) when not
+      // submitted, so it never gets pushed into Supplier.purchases or the
+      // audit log as a spurious "sellingPrice: undefined".
+      ...(hasSellingPrice ? { sellingPrice: roundMoney(it.sellingPrice) } : {}),
+    };
+  });
   const totalAmount = roundMoney(cleanItems.reduce((sum, it) => sum + it.unitCost * it.quantity, 0));
   // Amount-owed tracking only makes sense against a real supplier — a
   // self-purchase has no one to owe money to.
@@ -1061,10 +1087,30 @@ app.post('/supplier/purchase', requireAuth, asyncHandler(async (req, res) => {
           date: new Date(),
           supplierID: isSelfPurchase ? null : supplier._id,
         });
+        // Stage 21: only append a new sellingPriceHistory entry if a
+        // selling price was actually submitted for this item AND it
+        // differs from the current one — identical to the "did the price
+        // move" guard POST /api/product uses. buyingPriceHistory (above)
+        // is completely separate and always updates regardless.
+        if (item.sellingPrice !== undefined) {
+          const currentSellingPrice = roundMoney(getLatestSellingPrice(product));
+          if (item.sellingPrice > 0 && item.sellingPrice !== currentSellingPrice) {
+            product.sellingPriceHistory.push({ price: item.sellingPrice, date: new Date() });
+          }
+        }
         await product.save({ session });
       }
 
       if (!isSelfPurchase) {
+        // Note: Supplier.purchases' item sub-schema (models/Supplier.js)
+        // doesn't declare a `sellingPrice` field, so Mongoose silently
+        // strips it here even though cleanItems carries it — intentional,
+        // not a bug. A supplier's purchase-history table is a record of
+        // what was bought/owed, not a place selling-price changes need to
+        // live twice; the actual record of the change is
+        // Product.sellingPriceHistory (updated above) and this action's
+        // own audit-log entry (below, which does keep it — before Mongo
+        // schema stripping applies).
         await Supplier.updateOne(
           { _id: supplier._id },
           { $push: { purchases: { purchaseID, totalAmount, amountPaid: paid, balanceDue, items: cleanItems } } },

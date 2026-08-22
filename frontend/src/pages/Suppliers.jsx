@@ -15,7 +15,7 @@ import { useAuth } from '../lib/AuthContext';
 // Supplier lookup/purchase record entirely instead of 404ing.
 const NO_SUPPLIER = 'NoSupplier';
 const emptySupplierForm = { supplierName: '', contactPerson: '', phone: '', email: '', address: '' };
-const emptyPurchaseForm = { supplierName: '', productId: '', quantity: '', unitCost: '', amountPaid: '' };
+const emptyPurchaseForm = { supplierName: '', productId: '', quantity: '', unitCost: '', sellingPrice: '', amountPaid: '' };
 const PAGE_SIZE = 10;
 
 export default function Suppliers() {
@@ -49,6 +49,13 @@ export default function Suppliers() {
   // buyingPriceHistory entry) from GET /api/products.
   const selectedPurchaseProduct = allProducts.find((p) => p.productID === purchaseForm.productId);
   const previousBuyingPrice = selectedPurchaseProduct?.costPrice ?? null;
+  // Stage 21: previous *selling* price for the same product, shown next
+  // to the new optional selling-price input below — deliberately a
+  // separate value from previousBuyingPrice above (allProducts.price is
+  // getLatestSellingPrice(), allProducts.costPrice is
+  // getLatestBuyingPrice() — see GET /api/products in main.js). Keeping
+  // these visibly distinct in the UI is the point of Stage 21 item 15.
+  const previousSellingPrice = selectedPurchaseProduct?.price ?? null;
 
   const loadSuppliers = async () => {
     setLoading(true);
@@ -129,17 +136,29 @@ export default function Suppliers() {
 
   const handleRecordPurchase = async (e) => {
     e.preventDefault();
-    const { supplierName, productId, quantity, unitCost, amountPaid } = purchaseForm;
+    const { supplierName, productId, quantity, unitCost, sellingPrice, amountPaid } = purchaseForm;
     const qty = parseInt(quantity);
     const cost = parseFloat(unitCost);
     if (!supplierName || !productId || isNaN(qty) || qty <= 0 || isNaN(cost) || cost < 0) {
       alert('Please fill in supplier, product, a valid quantity, and a valid unit cost.');
       return;
     }
+    // Stage 21: selling price is optional on this form — blank means
+    // "leave it alone", so it's only included in the item payload (and
+    // therefore only validated) when the admin actually typed something.
+    const trimmedSellingPrice = String(sellingPrice ?? '').trim();
+    let sp;
+    if (trimmedSellingPrice !== '') {
+      sp = parseFloat(trimmedSellingPrice);
+      if (isNaN(sp) || sp < 0) {
+        alert('Selling price must be a valid non-negative number, or left blank to leave it unchanged.');
+        return;
+      }
+    }
     try {
       const data = await api.recordPurchase({
         supplierName,
-        items: [{ productID: productId, quantity: qty, unitCost: cost }],
+        items: [{ productID: productId, quantity: qty, unitCost: cost, ...(sp !== undefined ? { sellingPrice: sp } : {}) }],
         amountPaid: parseFloat(amountPaid) || 0,
       });
       alert(
@@ -310,7 +329,7 @@ export default function Suppliers() {
 
           <div className="bg-white border rounded-lg p-6">
             <h2 className="text-xl text-brand-green font-bold mb-4">Record a Purchase (restocks the product)</h2>
-            <form onSubmit={handleRecordPurchase} className="grid grid-cols-1 md:grid-cols-5 gap-3 text-sm items-end">
+            <form onSubmit={handleRecordPurchase} className="grid grid-cols-1 md:grid-cols-6 gap-3 text-sm items-end">
               <div>
                 <label className="block mb-1 font-medium">Supplier</label>
                 <select
@@ -349,10 +368,10 @@ export default function Suppliers() {
                 />
               </div>
               <div>
-                <label className="block mb-1 font-medium">Unit Cost</label>
+                <label className="block mb-1 font-medium">Cost / Buying Price</label>
                 {isAdmin && purchaseForm.productId && (
                   <p className="text-xs text-gray-500 mb-1">
-                    Previous: <span className="font-medium text-gray-700">{formatMoney(previousBuyingPrice ?? 0)}</span>
+                    Previous cost: <span className="font-medium text-gray-700">{formatMoney(previousBuyingPrice ?? 0)}</span>
                   </p>
                 )}
                 <input
@@ -361,6 +380,24 @@ export default function Suppliers() {
                   min="0"
                   value={purchaseForm.unitCost}
                   onChange={(e) => setPurchaseForm({ ...purchaseForm, unitCost: e.target.value })}
+                  className="border rounded px-3 py-2 w-full"
+                />
+              </div>
+              <div>
+                <label className="block mb-1 font-medium">Selling Price (optional)</label>
+                {isAdmin && purchaseForm.productId && (
+                  <p className="text-xs text-gray-500 mb-1">
+                    Previous selling price:{' '}
+                    <span className="font-medium text-gray-700">{formatMoney(previousSellingPrice ?? 0)}</span>
+                  </p>
+                )}
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={purchaseForm.sellingPrice}
+                  onChange={(e) => setPurchaseForm({ ...purchaseForm, sellingPrice: e.target.value })}
+                  placeholder="Leave blank to keep unchanged"
                   className="border rounded px-3 py-2 w-full"
                 />
               </div>
@@ -378,12 +415,13 @@ export default function Suppliers() {
                   />
                 </div>
               )}
-              <div className="md:col-span-5">
+              <div className="md:col-span-6">
                 <button type="submit" className="px-4 py-2 bg-brand-green text-white rounded hover:bg-green-700">
                   Record Purchase
                 </button>
                 <p className="text-xs text-gray-500 mt-1">
                   Increases the product's stock immediately and logs what we still owe the supplier if not paid in full.
+                  Selling price is optional — leave it blank to keep the product's current customer-facing price.
                 </p>
               </div>
             </form>

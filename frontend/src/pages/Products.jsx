@@ -283,10 +283,10 @@ export default function Products() {
                     />
                   </div>
                   <div>
-                    <label className="block mb-1 font-medium">Price</label>
+                    <label className="block mb-1 font-medium">Selling Price</label>
                     {isAdmin && mode === 'update' && (
                       <p className="text-xs text-gray-500 mb-1">
-                        Previous: <span className="font-medium text-gray-700">{formatMoney(previousPrice ?? 0)}</span>
+                        Previous selling price: <span className="font-medium text-gray-700">{formatMoney(previousPrice ?? 0)}</span>
                       </p>
                     )}
                     <input
@@ -295,7 +295,7 @@ export default function Products() {
                       min="0"
                       value={form.price}
                       onChange={(e) => setForm({ ...form, price: e.target.value })}
-                      placeholder="Enter price"
+                      placeholder="Enter selling price"
                       className="border rounded px-3 py-2 w-full"
                     />
                   </div>

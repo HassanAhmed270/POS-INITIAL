@@ -245,6 +245,23 @@ works; `main.js` logs a warning at boot and there's just no UI to serve.
   `getLatestSellingPrice(product)` / `getLatestBuyingPrice(product)`
   (`lib/pricing.js`), never `product.sellingPriceHistory[0].price` or
   similar.
+- **Restocking can update selling price too, not just cost (Stage 21)**:
+  `POST /supplier/purchase` accepts an optional per-item `sellingPrice`
+  alongside the required `unitCost`. Omitted/blank means "leave it
+  alone" — it's validated and only written (inside the same
+  `session.withTransaction()` as the stock/`buyingPriceHistory` update)
+  when submitted **and** different from the product's current selling
+  price, the same "did it actually move" guard `POST /api/product`
+  already used for its own price field. This is the *only* place besides
+  the Products edit form that writes to `sellingPriceHistory` —
+  `buyingPriceHistory` and `sellingPriceHistory` stay fully independent
+  arrays regardless of which flow (Products form vs. restock) triggered
+  the write; updating one never implicitly touches the other.
+  `Supplier.purchases[].items` doesn't declare a `sellingPrice` field, so
+  Mongoose silently strips it there when the purchase record is saved —
+  intentional; the durable record of the change is
+  `Product.sellingPriceHistory` itself plus the action's audit-log entry,
+  not a second copy on the supplier's purchase history.
 - **Money rounding**: use `roundMoney()` (`lib/money.js`) on every
   computed amount before storing or comparing — floating-point drift
   across many small discounts/payments is the usual source of "off by a

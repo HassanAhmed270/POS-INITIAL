@@ -539,6 +539,81 @@ reflect it correctly) before treating this fully closed. Also recommend
 double-checking any existing production products' `supplier` string
 values before merging, given the breaking-schema-change note above.
 
+## Stage 21 — Unified Product Pricing, Restock & Price Synchronization
+
+Audit first: most of this stage's exit criteria already held before any
+code changed. `getLatestSellingPrice()`/`getLatestBuyingPrice()`
+(`lib/pricing.js`) already keep the two histories fully separate;
+`GET /api/products` already exposes both as distinct `price`/`costPrice`
+fields; Billing/Products/receipts already read only `price`
+(`getLatestSellingPrice`), never `costPrice`; `POST /billing/orderDetails`
+already re-verifies against `getLatestSellingPrice()`; Stage 13's
+"Previous" display in `Products.jsx` was already the previous *selling*
+price, not cost. The one real gap: **restocking could only ever touch
+`buyingPriceHistory`** — there was no way to update a product's selling
+price from the Supplier/restock flow, only from the Products edit form.
+
+**Backend (`POST /supplier/purchase`)**: each item may now optionally
+carry a `sellingPrice` alongside its required `unitCost`. Blank/omitted
+means "leave the selling price alone" — not "set it to zero" — validated
+the same way as `unitCost` (finite, ≥0) only when actually submitted, so
+an invalid value still 400s before any DB call. Inside the existing
+`session.withTransaction()` block, after the stock/`buyingPriceHistory`
+update, a `sellingPriceHistory` entry is pushed **only if** a price was
+submitted **and** it differs from the current one — identical "did it
+actually move" guard `POST /api/product` already uses, so
+`sellingPriceHistory` doesn't grow every time a restock happens to repeat
+the same price. `buyingPriceHistory` and `sellingPriceHistory` remain
+fully independent arrays; updating one never touches the other, in
+either direction (Product edit form still never writes
+`buyingPriceHistory`; restock's `unitCost` still never touches
+`sellingPriceHistory` unless `sellingPrice` was separately submitted).
+`Supplier.purchases[].items` sub-schema doesn't declare a `sellingPrice`
+field, so Mongoose silently strips it there (intentional — a supplier's
+purchase-history table records what was bought/owed, not a second place
+for price changes to live; the real record is
+`Product.sellingPriceHistory` plus this action's own audit-log entry,
+which does retain it).
+
+**Frontend (`Suppliers.jsx`)**: the restock form gained a "Selling Price
+(optional)" input next to the existing "Cost / Buying Price" (renamed
+from "Unit Cost" for clarity per the exit criteria's explicit-labeling
+requirement), each showing its own distinct "Previous" line —
+`previousBuyingPrice` (`costPrice`, unchanged) and the new
+`previousSellingPrice` (`price`) — sourced from the same
+`GET /api/products` response, so there's no ambiguity about which
+"previous" is which. Left blank, the field submits nothing and the
+product's selling price is untouched. `Products.jsx`'s price field/label
+was renamed "Price" → "Selling Price" ("Previous:" → "Previous selling
+price:") for the same explicit-labeling reason — no behavior change,
+label only.
+
+**Verified:** `node --check` clean on `main.js`. `npm run build` and
+`npm run lint` clean on the frontend — same one pre-existing unrelated
+`AuthContext.jsx` warning as every prior stage, no new ones. Live boot
+test (single `bash_tool` call, no MongoDB in this sandbox): unauthenticated
+`POST /supplier/purchase` → 401 unchanged; a negative or non-numeric
+`sellingPrice` → clean 400 **before any DB call**, confirming the
+validation guard doesn't depend on a live database; a worker token and an
+admin token, each with a valid payload including a `sellingPrice`, both
+passed the auth/validation gates and reached the expected DB-buffering
+timeout (no replica set here, same limitation as every stage since 12) —
+the server stayed up and kept responding correctly to requests made
+immediately afterward (regression-checked `GET /api/products` → 401 no
+token, `POST /api/product` worker token → 403 "Admins only.").
+
+**Not verified:** no live MongoDB replica set or real browser in this
+sandbox — the actual DB-backed behavior (a restock that submits a new
+selling price actually appearing as the new `price` on `GET /api/products`
+and in Billing's product list/cart, a restock that omits it leaving the
+selling price untouched, `sellingPriceHistory` not growing on a repeated
+same-price restock, the new form fields rendering/gating correctly for
+admin vs. non-admin) is code-reviewed and validation-gate-tested only.
+Recommend a manual pass against a real replica set (restock a product
+both with and without a selling price, confirm Products/Billing reflect
+it correctly and history arrays grow as expected) before treating this
+fully closed.
+
 ## Route Inventory — End of Stage 15
 
 **Public:** `POST /auth/login`, `POST /billing/orderid`
@@ -576,10 +651,10 @@ supports `range=week|month|year`. Exports: `summary`, `sales`, `refunds`,
 
 ## Current Status
 
-Stages 1–17 and 19–20 implemented (Stage 18, desktop distribution,
+Stages 1–17 and 19–21 implemented (Stage 18, desktop distribution,
 remains deliberately skipped/deferred — see the note at the top of its
 Stage 19 entry above). Stage 11 **end-to-end verified in a real browser +
-database**. Stages 1–10/12–17/19–20 verified by
+database**. Stages 1–10/12–17/19–21 verified by
 build/lint/`node --check`/boot-test/unit-test per stage above — DB paths
 past the auth gate are code-reviewed only (no replica set in this
 sandbox), Stage 16's responsive layout and Stage 17's print/preview
@@ -589,6 +664,9 @@ this sandbox either — see Stage 16/17 above). EJS removal complete and
 verified. Remaining items are deliberate scope limitations and
 security/stress-testing/manual-check follow-ups unless a new spec adds
 scope.
+
+Stage 22 (Batch-Based Costing & Dashboard Profit / FIFO) is next in
+`optimization.md`, explicitly depends on this stage.
 
 Stage 20 also carries a **breaking schema change** (`Product.supplier`
 string → `Product.supplierID` reference) with no migration path in this
