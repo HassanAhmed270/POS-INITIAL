@@ -257,20 +257,45 @@ export default function Suppliers() {
                             <td className="py-2 px-3">{s.contactPerson}</td>
                             <td className="py-2 px-3">{s.phone}</td>
                             <td className="py-2 px-3">{s.purchases.length}</td>
-                            {/* Single combined field, not two separate always-visible
-                                "We Owe"/"Credit" columns — a supplier realistically
-                                carries one or the other at a time, so show whichever
-                                applies (red = owed, green = credit) rather than a
-                                second column that's "—" almost every row. */}
-                            <td className="py-2 px-3">
-                              {s.totalBalanceDue > 0 ? (
-                                <span className="text-red-700 font-semibold">{formatMoney(s.totalBalanceDue)} owed</span>
-                              ) : s.creditBalance > 0 ? (
-                                <span className="text-green-700 font-semibold">{formatMoney(s.creditBalance)} credit</span>
-                              ) : (
-                                <span className="text-gray-400">{formatMoney(0)}</span>
-                              )}
-                            </td>
+                            {/* Single combined field showing the NET position — what's
+                                due on unpaid purchases minus available credit — rather
+                                than just picking one to show and hiding the other. A
+                                supplier can genuinely have both at once (some purchases
+                                still owe money, a different purchase generated credit
+                                that hasn't been consumed by a new restock yet); showing
+                                only totalBalanceDue in that case looked like the credit
+                                had vanished, when it's just not netted against *older*
+                                purchases (only applied going forward, to the next
+                                restock — see POST /supplier/purchase). The breakdown
+                                line makes that math visible instead of a bare number. */}
+                            {(() => {
+                              const netBalance = roundMoney((s.totalBalanceDue || 0) - (s.creditBalance || 0));
+                              return (
+                                <td className="py-2 px-3">
+                                  {netBalance > 0 ? (
+                                    <>
+                                      <span className="text-red-700 font-semibold">{formatMoney(netBalance)} owed</span>
+                                      {s.creditBalance > 0 && (
+                                        <div className="text-[10px] text-gray-500">
+                                          {formatMoney(s.totalBalanceDue)} due − {formatMoney(s.creditBalance)} credit
+                                        </div>
+                                      )}
+                                    </>
+                                  ) : netBalance < 0 ? (
+                                    <>
+                                      <span className="text-green-700 font-semibold">{formatMoney(-netBalance)} credit</span>
+                                      {s.totalBalanceDue > 0 && (
+                                        <div className="text-[10px] text-gray-500">
+                                          {formatMoney(s.creditBalance)} credit − {formatMoney(s.totalBalanceDue)} due
+                                        </div>
+                                      )}
+                                    </>
+                                  ) : (
+                                    <span className="text-gray-400">{formatMoney(0)}</span>
+                                  )}
+                                </td>
+                              );
+                            })()}
                             <td className="py-2 px-3">
                               {isAdmin ? (
                                 <button

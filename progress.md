@@ -737,6 +737,45 @@ pre-existing unrelated `AuthContext.jsx` warning). Not re-verified
 against a live database beyond that — pure layout change on data that
 was already confirmed correct in the previous entry.
 
+## Post-Stage-21 Fix — Combined Balance Column Was Hiding Credit, Not Netting It
+
+Reported from a screenshot: a supplier showed "$1050.00 owed" with no
+mention of credit at all, even though one of that supplier's purchases
+in the same table clearly showed a $500 overpayment (Total $500, Paid
+$1000). Root cause: the previous commit's combined Balance column picked
+*either* `totalBalanceDue` *or* `creditBalance` to display, prioritizing
+"owed" whenever it was nonzero — so a supplier that genuinely had both
+(older unpaid purchases *and* separate credit from a different, newer
+overpayment) had its credit silently hidden from this view entirely,
+which looked exactly like the original overpayment bug all over again
+even though the credit was correctly recorded and available in the API
+response the whole time.
+
+**Fix (`Suppliers.jsx`, display only)**: the Balance column now shows
+the **net** of the two — `netBalance = totalBalanceDue - creditBalance`
+— red "`$X owed`" when positive, green "`$X credit`" when negative, plain
+`$0.00` at exactly zero. Whenever both figures are nonzero, a small
+gray breakdown line appears underneath (e.g. "$1050.00 due − $500.00
+credit") so the math is visible instead of just a number that doesn't
+obviously add up from the purchase rows below it. No backend or schema
+change — `totalBalanceDue` and `creditBalance` are unchanged, still
+computed exactly as in the credit-fix commit above; this is purely how
+they're combined for display.
+
+Worth being explicit about what this *isn't*: the credit is still only
+mechanically consumed by the supplier's *next* restock (per
+`POST /supplier/purchase`'s `creditApplied` logic) — it does not
+retroactively rewrite the `balanceDue` stored on the older unpaid
+purchases below it in the table. The net figure at the top is an
+accurate *summary* of the supplier's overall position; the per-purchase
+rows underneath intentionally stay a historical record of what actually
+happened on each purchase, not a live-recalculated ledger.
+
+**Verified:** `npm run build` + `npm run lint` clean (same one
+pre-existing unrelated `AuthContext.jsx` warning). Net-balance arithmetic
+hand-verified against the exact numbers from the reported screenshot
+(1050 due − 500 credit = 550), matches expected display.
+
 ## Route Inventory — End of Stage 15
 
 **Public:** `POST /auth/login`, `POST /billing/orderid`
