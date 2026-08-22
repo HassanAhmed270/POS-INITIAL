@@ -23,6 +23,17 @@ const purchaseItemSchema = new Schema(
 // purchase history row can show "was partly covered by existing
 // credit" rather than that credit silently vanishing into the balance
 // math) — it's a snapshot, never re-read or re-applied after the fact.
+//
+// creditGenerated — the flip side: how much of amountPaid on *this*
+// purchase went toward *new* credit rather than the purchase itself,
+// because either the total was already fully covered by creditApplied
+// above, or amountPaid simply exceeded what was left owed after that.
+// Without this recorded separately, a row showing e.g. totalAmount=200,
+// amountPaid=250, creditApplied=200 reads as contradictory — it looks
+// like $450 of value went toward a $200 purchase. Recording the $250
+// as creditGenerated makes clear all of it became new credit (since the
+// $200 total was already paid for by existing credit, none of this
+// purchase's own cash was needed), not that anything was double-counted.
 const purchaseSchema = new Schema(
   {
     purchaseID: { type: String, required: true, match: /^PUR-\d{4}$/, unique: true },
@@ -31,6 +42,7 @@ const purchaseSchema = new Schema(
     amountPaid: { type: Number, required: true, min: 0, default: 0 },
     balanceDue: { type: Number, required: true, min: 0, default: 0 },
     creditApplied: { type: Number, min: 0, default: 0 },
+    creditGenerated: { type: Number, min: 0, default: 0 },
     items: [purchaseItemSchema]
   },
   { _id: false }

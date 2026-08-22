@@ -825,6 +825,56 @@ to 350.
 `allSuppliers`-driven credit lookup and the live-updating helper text
 are code-reviewed and build/lint-verified only.
 
+## Post-Stage-21 Fix — Paid Exceeding Total Looked Contradictory Without a "New Credit" Note
+
+Reported from a screenshot: purchase-history rows where `amountPaid`
+exceeded `totalAmount` (e.g. Total $200, Paid $250, with a "$200.00
+credit applied" note already on the Balance cell) read as
+self-contradictory — it looked like $450 of value went toward a $200
+purchase. It didn't: the $200 credit-applied figure is *existing*
+credit that covered the total, and the $250 paid was a *separate* amount
+that, since nothing was actually owed by that point, became entirely
+new credit — but nothing in the table said so, so the numbers looked
+unexplained rather than merely surprising.
+
+**Backend (`models/Supplier.js`, `main.js`)**: purchase sub-schema
+gained `creditGenerated` (`min: 0`, default 0) — the mirror image of
+`creditApplied`. Where `creditApplied` records how much *existing*
+credit was consumed by this purchase, `creditGenerated` records how much
+of *this purchase's own payment* became *new* credit (previously this
+value was computed as a local `overpay` variable and used only to update
+`Supplier.creditBalance` — never itself recorded on the purchase row, so
+there was no way to show it after the fact). Same "only ever created
+here, never re-applied" audit-snapshot pattern as `creditApplied`.
+`POST /supplier/purchase`'s response now also returns `creditGenerated`
+alongside the existing `creditApplied`/`creditBalance` fields.
+
+**Frontend (`Suppliers.jsx`)**: the Paid cell now shows a small green
+"`+$X new credit`" note beneath the amount when `creditGenerated > 0`,
+and the existing Balance-cell credit note was reworded from "credit
+applied" to "credit used" to read more clearly as the opposite of the
+new note above it. Together a row like Total $200 / Paid $250 now reads:
+Balance $0.00 ("$200.00 credit used") / Paid $250.00 ("+$250.00 new
+credit") — making it explicit that the $200 total was paid for by
+*existing* credit, and the entire $250 tendered became *new* credit
+since nothing further was actually owed. The post-purchase confirmation
+alert was reworded to match, now mentioning `creditGenerated`
+specifically ("$X of what you paid went beyond what was owed and became
+new credit") rather than only the running total.
+
+**Verified:** `node --check` clean on `main.js`/`models/Supplier.js`.
+`npm run build`/`npm run lint` clean on the frontend (same one
+pre-existing unrelated `AuthContext.jsx` warning). Live boot test: a
+valid overpay-on-top-of-existing-credit payload passes every gate and
+reaches the expected DB-buffering timeout (no replica set in this
+sandbox); no unexpected errors in the server log; regression check
+(`401` no token) unchanged.
+
+**Not verified:** no live database/browser in this sandbox — the new
+field actually round-tripping through a real restock and appearing
+correctly in the UI is code-reviewed and boot-tested (validation gates
+only) rather than confirmed end-to-end.
+
 ## Route Inventory — End of Stage 15
 
 **Public:** `POST /auth/login`, `POST /billing/orderid`

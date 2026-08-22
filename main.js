@@ -1101,6 +1101,7 @@ app.post('/supplier/purchase', requireAuth, asyncHandler(async (req, res) => {
   let paid = isSelfPurchase ? totalAmount : null;
   let balanceDue = isSelfPurchase ? 0 : null;
   let creditApplied = 0;
+  let creditGenerated = 0;
   let newCreditBalance = 0;
 
   const session = await mongoose.startSession();
@@ -1145,10 +1146,10 @@ app.post('/supplier/purchase', requireAuth, asyncHandler(async (req, res) => {
         const existingCredit = roundMoney(supplierDoc.creditBalance || 0);
         creditApplied = roundMoney(Math.min(existingCredit, totalAmount));
         const netOwed = roundMoney(totalAmount - creditApplied);
-        const overpay = roundMoney(Math.max(0, paidInput - netOwed));
+        creditGenerated = roundMoney(Math.max(0, paidInput - netOwed));
         paid = paidInput; // what was actually paid this transaction, recorded as-is (no longer capped)
         balanceDue = roundMoney(Math.max(0, netOwed - paidInput));
-        newCreditBalance = roundMoney(existingCredit - creditApplied + overpay);
+        newCreditBalance = roundMoney(existingCredit - creditApplied + creditGenerated);
 
         // Note: Supplier.purchases' item sub-schema (models/Supplier.js)
         // doesn't declare a `sellingPrice` field, so Mongoose silently
@@ -1163,7 +1164,7 @@ app.post('/supplier/purchase', requireAuth, asyncHandler(async (req, res) => {
           { _id: supplier._id },
           {
             $set: { creditBalance: newCreditBalance },
-            $push: { purchases: { purchaseID, totalAmount, amountPaid: paid, balanceDue, creditApplied, items: cleanItems } },
+            $push: { purchases: { purchaseID, totalAmount, amountPaid: paid, balanceDue, creditApplied, creditGenerated, items: cleanItems } },
           },
           { session }
         );
@@ -1186,6 +1187,7 @@ app.post('/supplier/purchase', requireAuth, asyncHandler(async (req, res) => {
                 amountPaid: paid,
                 balanceDue,
                 creditApplied,
+                creditGenerated,
                 newCreditBalance,
               },
         },
@@ -1207,6 +1209,7 @@ app.post('/supplier/purchase', requireAuth, asyncHandler(async (req, res) => {
           amountPaid: paid,
           balanceDue,
           creditApplied,
+          creditGenerated,
           creditBalance: newCreditBalance,
         }
   );

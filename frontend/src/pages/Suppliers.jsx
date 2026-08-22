@@ -213,11 +213,14 @@ export default function Suppliers() {
         // purchase automatically.
         const lines = [`Purchase ${data.purchaseID} recorded.`];
         if (data.creditApplied > 0) {
-          lines.push(`${formatMoney(data.creditApplied)} of existing credit was applied to this purchase.`);
+          lines.push(`${formatMoney(data.creditApplied)} of existing credit was used toward this purchase.`);
         }
         lines.push(`Balance due to supplier: ${formatMoney(data.balanceDue)}`);
+        if (data.creditGenerated > 0) {
+          lines.push(`${formatMoney(data.creditGenerated)} of what you paid went beyond what was owed and became new credit.`);
+        }
         if (data.creditBalance > 0) {
-          lines.push(`Overpayment recorded — supplier now has ${formatMoney(data.creditBalance)} credit, which will reduce their next purchase automatically.`);
+          lines.push(`Supplier now has ${formatMoney(data.creditBalance)} credit total, which will reduce their next purchase automatically.`);
         }
         alert(lines.join(' '));
       }
@@ -353,7 +356,26 @@ export default function Suppliers() {
                                           <td className="p-1 border">{new Date(p.date).toLocaleDateString()}</td>
                                           <td className="p-1 border">{p.items.map((it) => `${it.productID} x${it.quantity}`).join(', ')}</td>
                                           <td className="p-1 border">{formatMoney(p.totalAmount)}</td>
-                                          <td className="p-1 border">{formatMoney(p.amountPaid)}</td>
+                                          {/* Paid can legitimately exceed Total — either this
+                                              purchase's own overpayment created new credit
+                                              (below), or the total was already covered by
+                                              credit from an *earlier* purchase (see the
+                                              Balance cell), so none of this cash was actually
+                                              needed for the purchase itself. Without this
+                                              note a row like Total $200 / Paid $250 with
+                                              "$200 credit applied" on Balance reads as
+                                              contradictory — as if $450 went toward a $200
+                                              purchase. It didn't: this note makes clear how
+                                              much of Paid became new credit rather than
+                                              covering anything here. */}
+                                          <td className="p-1 border">
+                                            {formatMoney(p.amountPaid)}
+                                            {p.creditGenerated > 0 && (
+                                              <div className="text-green-600 font-normal text-[10px] leading-tight">
+                                                +{formatMoney(p.creditGenerated)} new credit
+                                              </div>
+                                            )}
+                                          </td>
                                           {/* Credit applied folded into this cell instead of
                                               its own column — a column that reads "—" on
                                               nearly every row wastes space; a small note only
@@ -362,7 +384,7 @@ export default function Suppliers() {
                                             {formatMoney(p.balanceDue)}
                                             {p.creditApplied > 0 && (
                                               <div className="text-green-600 font-normal text-[10px] leading-tight">
-                                                {formatMoney(p.creditApplied)} credit applied
+                                                {formatMoney(p.creditApplied)} credit used
                                               </div>
                                             )}
                                           </td>
