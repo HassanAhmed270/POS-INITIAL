@@ -237,16 +237,15 @@ export default function Suppliers() {
                       <th className="py-3 px-2 text-left">Contact</th>
                       <th className="py-3 px-2 text-left">Phone</th>
                       <SortableHeader label="Purchases" field="purchaseCount" sortBy={sortBy} sortDir={sortDir} onSort={handleSort} />
-                      <SortableHeader label="We Owe" field="totalBalanceDue" sortBy={sortBy} sortDir={sortDir} onSort={handleSort} />
-                      <th className="py-3 px-2 text-left">Credit</th>
+                      <SortableHeader label="Balance" field="totalBalanceDue" sortBy={sortBy} sortDir={sortDir} onSort={handleSort} />
                       <th className="py-3 px-2 text-left">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
                     {loading ? (
-                      <tr><td colSpan={7} className="py-6 text-center text-gray-400">Loading…</td></tr>
+                      <tr><td colSpan={6} className="py-6 text-center text-gray-400">Loading…</td></tr>
                     ) : suppliers.length === 0 ? (
-                      <tr><td colSpan={7} className="py-6 text-center text-gray-400">No suppliers found</td></tr>
+                      <tr><td colSpan={6} className="py-6 text-center text-gray-400">No suppliers found</td></tr>
                     ) : (
                       suppliers.map((s) => (
                         <Fragment key={s.supplierName}>
@@ -258,11 +257,19 @@ export default function Suppliers() {
                             <td className="py-2 px-3">{s.contactPerson}</td>
                             <td className="py-2 px-3">{s.phone}</td>
                             <td className="py-2 px-3">{s.purchases.length}</td>
-                            <td className={`py-2 px-3 ${s.totalBalanceDue > 0 ? 'text-red-700 font-semibold' : ''}`}>
-                              {formatMoney(s.totalBalanceDue)}
-                            </td>
-                            <td className={`py-2 px-3 ${s.creditBalance > 0 ? 'text-green-700 font-semibold' : ''}`}>
-                              {s.creditBalance > 0 ? formatMoney(s.creditBalance) : '—'}
+                            {/* Single combined field, not two separate always-visible
+                                "We Owe"/"Credit" columns — a supplier realistically
+                                carries one or the other at a time, so show whichever
+                                applies (red = owed, green = credit) rather than a
+                                second column that's "—" almost every row. */}
+                            <td className="py-2 px-3">
+                              {s.totalBalanceDue > 0 ? (
+                                <span className="text-red-700 font-semibold">{formatMoney(s.totalBalanceDue)} owed</span>
+                              ) : s.creditBalance > 0 ? (
+                                <span className="text-green-700 font-semibold">{formatMoney(s.creditBalance)} credit</span>
+                              ) : (
+                                <span className="text-gray-400">{formatMoney(0)}</span>
+                              )}
                             </td>
                             <td className="py-2 px-3">
                               {isAdmin ? (
@@ -280,19 +287,18 @@ export default function Suppliers() {
                           </tr>
                           {expandedName === s.supplierName && (
                             <tr className="bg-gray-50">
-                              <td colSpan={7} className="p-4">
+                              <td colSpan={6} className="p-4">
                                 <h4 className="font-medium text-sm mb-2">Purchase history</h4>
                                 {s.purchases.length === 0 ? (
                                   <p className="text-xs text-gray-400">No purchases recorded yet.</p>
                                 ) : (
-                                  <table className="w-full min-w-[600px] text-xs bg-white border-collapse">
+                                  <table className="w-full min-w-[560px] text-xs bg-white border-collapse">
                                     <thead className="bg-gray-100">
                                       <tr>
                                         <th className="p-1 text-left border">Purchase ID</th>
                                         <th className="p-1 text-left border">Date</th>
                                         <th className="p-1 text-left border">Items</th>
                                         <th className="p-1 text-left border">Total</th>
-                                        <th className="p-1 text-left border">Credit Applied</th>
                                         <th className="p-1 text-left border">Paid</th>
                                         <th className="p-1 text-left border">Balance</th>
                                       </tr>
@@ -304,9 +310,19 @@ export default function Suppliers() {
                                           <td className="p-1 border">{new Date(p.date).toLocaleDateString()}</td>
                                           <td className="p-1 border">{p.items.map((it) => `${it.productID} x${it.quantity}`).join(', ')}</td>
                                           <td className="p-1 border">{formatMoney(p.totalAmount)}</td>
-                                          <td className="p-1 border">{p.creditApplied > 0 ? formatMoney(p.creditApplied) : '—'}</td>
                                           <td className="p-1 border">{formatMoney(p.amountPaid)}</td>
-                                          <td className={`p-1 border ${p.balanceDue > 0 ? 'text-red-700 font-semibold' : ''}`}>{formatMoney(p.balanceDue)}</td>
+                                          {/* Credit applied folded into this cell instead of
+                                              its own column — a column that reads "—" on
+                                              nearly every row wastes space; a small note only
+                                              appears here when credit was actually used. */}
+                                          <td className={`p-1 border ${p.balanceDue > 0 ? 'text-red-700 font-semibold' : ''}`}>
+                                            {formatMoney(p.balanceDue)}
+                                            {p.creditApplied > 0 && (
+                                              <div className="text-green-600 font-normal text-[10px] leading-tight">
+                                                {formatMoney(p.creditApplied)} credit applied
+                                              </div>
+                                            )}
+                                          </td>
                                         </tr>
                                       ))}
                                     </tbody>

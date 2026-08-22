@@ -707,6 +707,36 @@ validation-gate-tested only. This is exactly what's being manually tested
 now — recommend confirming the scenarios above against a real replica set
 before treating it fully closed.
 
+## Post-Stage-21 UI Tweak — Combined Balance/Credit Columns
+
+Follow-up from a screenshot review of the credit fix above: the supplier
+list had **both** a "We Owe" and a "Credit" column, and the
+purchase-history sub-table had a separate "Credit Applied" column — in
+practice a supplier only carries one side of that (owed *or* credited)
+at a time, and a purchase either used credit or it didn't, so most rows
+showed a bare "—" in one of those columns. Flagged as looking cluttered/
+redundant.
+
+**`Suppliers.jsx`**: the supplier list's "We Owe"/"Credit" columns are
+now a single **Balance** column — red "`$X owed`" when `totalBalanceDue`
+> 0, green "`$X credit`" when `creditBalance` > 0 (mutually exclusive in
+practice; if a supplier somehow carried both, owed takes display
+priority since that's the more actionable number), otherwise a plain
+`$0.00`. Still sorts by `totalBalanceDue` under the hood — same field as
+before, just relabeled. The purchase-history sub-table's "Credit
+Applied" column was removed entirely; when a purchase actually applied
+credit (`creditApplied > 0`), a small green note now appears inline
+under that row's Balance figure instead of occupying its own column that
+was blank almost everywhere. Table `colSpan`s dropped from 7 to 6
+throughout to match the removed column. No backend or data-shape changes
+— `creditBalance`/`totalBalanceDue`/`creditApplied` are all still
+returned exactly as before, this is presentation only.
+
+**Verified:** `npm run build` + `npm run lint` clean (same one
+pre-existing unrelated `AuthContext.jsx` warning). Not re-verified
+against a live database beyond that — pure layout change on data that
+was already confirmed correct in the previous entry.
+
 ## Route Inventory — End of Stage 15
 
 **Public:** `POST /auth/login`, `POST /billing/orderid`
