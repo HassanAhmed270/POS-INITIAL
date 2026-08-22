@@ -57,29 +57,47 @@ export default function Suppliers() {
   // these visibly distinct in the UI is the point of Stage 21 item 15.
   const previousSellingPrice = selectedPurchaseProduct?.price ?? null;
 
-  // Credit-fix follow-up: Amount Paid now auto-fills with quantity ×
-  // cost (the purchase total) whenever either changes, so the field
-  // reflects "pay in full" by default instead of starting blank — but
-  // stays fully editable for a deliberate partial payment or an
-  // intentional overpayment. `autoFilledPaid` tracks the value *we* last
-  // wrote in, so the effect below only overwrites the field when it
-  // still matches what we auto-filled (i.e. the admin hasn't typed their
-  // own number since) — editing amountPaid by hand always wins.
+  // Credit-fix follow-up #2: the auto-fill (and the "how much do you
+  // actually owe" figure it's based on) needs to account for whatever
+  // credit this supplier already has — otherwise accepting the default
+  // "pay in full" amount on a purchase that's already fully or partly
+  // covered by existing credit silently creates *more* credit on top of
+  // what's already there (reported: credit ballooning to $850 across a
+  // few ordinary restocks, not from anyone deliberately overpaying).
+  // allSuppliers already carries creditBalance from the same
+  // GET /api/suppliers response used to populate this dropdown.
+  const selectedSupplierCredit =
+    purchaseForm.supplierName && purchaseForm.supplierName !== NO_SUPPLIER
+      ? allSuppliers.find((s) => s.supplierName === purchaseForm.supplierName)?.creditBalance ?? 0
+      : 0;
+
+  // Amount Paid now auto-fills with what's actually still owed after
+  // existing credit is applied — quantity × cost, minus this supplier's
+  // creditBalance, floored at 0 — not the raw total. Stays fully
+  // editable for a deliberate partial payment or an intentional
+  // overpayment; `autoFilledPaid` tracks the value *we* last wrote in,
+  // so the effect below only overwrites the field when it still matches
+  // what we auto-filled (i.e. the admin hasn't typed their own number
+  // since) — editing amountPaid by hand always wins. This mirrors
+  // exactly the netOwed/creditApplied math POST /supplier/purchase does
+  // server-side, so the field an admin sees is what they'll actually be
+  // asked to pay, not last time's total.
   const autoFilledPaid = useRef('');
   useEffect(() => {
     const qty = parseInt(purchaseForm.quantity);
     const cost = parseFloat(purchaseForm.unitCost);
     const computedTotal = Number.isInteger(qty) && qty > 0 && Number.isFinite(cost) && cost >= 0 ? roundMoney(qty * cost) : '';
+    const computedNetOwed = computedTotal === '' ? '' : roundMoney(Math.max(0, computedTotal - selectedSupplierCredit));
     setPurchaseForm((prev) => {
       if (prev.amountPaid !== '' && prev.amountPaid !== autoFilledPaid.current) {
         // Admin typed their own value — leave it alone.
         return prev;
       }
-      autoFilledPaid.current = computedTotal === '' ? '' : String(computedTotal);
+      autoFilledPaid.current = computedNetOwed === '' ? '' : String(computedNetOwed);
       return { ...prev, amountPaid: autoFilledPaid.current };
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [purchaseForm.quantity, purchaseForm.unitCost]);
+  }, [purchaseForm.quantity, purchaseForm.unitCost, purchaseForm.supplierName, selectedSupplierCredit]);
 
   const loadSuppliers = async () => {
     setLoading(true);
@@ -489,7 +507,11 @@ export default function Suppliers() {
               {purchaseForm.supplierName !== NO_SUPPLIER && (
                 <div>
                   <label className="block mb-1 font-medium">Amount Paid</label>
-                  <p className="text-xs text-gray-500 mb-1">Auto-fills as quantity × cost — edit for a partial payment or overpayment.</p>
+                  <p className="text-xs text-gray-500 mb-1">
+                    {selectedSupplierCredit > 0
+                      ? `Auto-fills with what's still owed after this supplier's ${formatMoney(selectedSupplierCredit)} credit is applied — edit for a partial payment or overpayment.`
+                      : 'Auto-fills as quantity × cost — edit for a partial payment or overpayment.'}
+                  </p>
                   <input
                     type="number"
                     step="0.01"

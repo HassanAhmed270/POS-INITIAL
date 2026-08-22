@@ -776,6 +776,55 @@ pre-existing unrelated `AuthContext.jsx` warning). Net-balance arithmetic
 hand-verified against the exact numbers from the reported screenshot
 (1050 due − 500 credit = 550), matches expected display.
 
+## Post-Stage-21 Fix — Credit Was Silently Ballooning on Ordinary Restocks
+
+Reported from a screenshot: a supplier's credit had grown to $850 across
+a handful of otherwise-ordinary restocks — nobody had deliberately
+overpaid on most of them, yet each one added more credit anyway (e.g. a
+$200 purchase, paid exactly $200, still added $200 of *new* credit on
+top of what the supplier already had). Root cause: the Amount Paid
+auto-fill (added in the earlier credit-fix commit) always defaulted to
+the raw purchase total — `quantity × unitCost` — with no awareness of
+whatever credit the supplier already carried. Server-side, once existing
+credit already fully covers a purchase (`netOwed` reaches 0), *anything*
+paid beyond that is defined as pure overpayment and becomes more credit
+(`overpay = max(0, paidInput - netOwed)`) — which is correct in
+isolation, but the auto-filled default kept nudging admins into typing
+the full total even when the real remaining balance was $0, so simply
+accepting the default on a routine restock silently created more credit
+every time, with nothing in the UI making that obvious.
+
+**Fix (`Suppliers.jsx`, frontend only — the backend math from the
+previous credit-fix commit was already correct and is unchanged)**:
+- The Amount Paid auto-fill now computes `netOwed = max(0, total −
+  selectedSupplierCredit)` instead of the raw total, mirroring exactly
+  what `POST /supplier/purchase` will actually compute server-side —
+  `selectedSupplierCredit` is looked up from `allSuppliers` (same
+  `GET /api/suppliers` response already used for the dropdown, so no new
+  request). Accepting the default on a purchase already fully covered by
+  existing credit now correctly proposes $0, consuming the credit instead
+  of stacking more on top of it.
+- The field's helper text now explicitly states the supplier's available
+  credit and that it's already been subtracted (e.g. "Auto-fills with
+  what's still owed after this supplier's $550.00 credit is applied…"),
+  so the reduced default doesn't look unexplained.
+- Manually typing a larger amount still works exactly as before and will
+  still (correctly) create additional credit — that's a deliberate
+  overpayment now, not an accidental one from a default the admin didn't
+  examine closely.
+
+**Verified:** `npm run build` + `npm run lint` clean (same one
+pre-existing unrelated `AuthContext.jsx` warning). Hand-simulated the
+exact scenario from the report (existing credit 550, a $200 purchase) —
+before the fix, accepting the old default (paid=200) left credit
+unchanged at 550 despite the purchase being fully covered; after the
+fix, accepting the new default (paid=0) correctly consumes credit down
+to 350.
+
+**Not verified:** no live database/browser in this sandbox — the
+`allSuppliers`-driven credit lookup and the live-updating helper text
+are code-reviewed and build/lint-verified only.
+
 ## Route Inventory — End of Stage 15
 
 **Public:** `POST /auth/login`, `POST /billing/orderid`
