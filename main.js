@@ -53,6 +53,15 @@ const ORDER_EDIT_WINDOW_MS = 72 * 60 * 60 * 1000; // 72 hours
 // about it specially except the two spots below that skip the Customer
 // collection for it.
 const WALKIN_CUSTOMER = 'Walk-in / Unknown';
+// Stage 20: the sentinel supplier value for stock the business bought
+// itself, with no external supplier involved. Mirrors WALKIN_CUSTOMER's
+// pattern — a plain string, defined identically here and in
+// Products.jsx/Suppliers.jsx — but unlike WALKIN_CUSTOMER it never gets
+// stored as-is: Product.supplierID and buyingPriceHistory[].supplierID
+// both store `null` for it (see resolveSupplierId() below), since there
+// is no Supplier document to reference and Stage 20 explicitly says one
+// must not be invented just to complete a purchase.
+const NO_SUPPLIER = 'NoSupplier';
 
 // ── Core middleware ─────────────────────────────────────────
 app.use(express.urlencoded({ extended: true }));
@@ -84,6 +93,18 @@ function parseThreshold(value) {
   if (value === undefined || value === null || value === '') return 10;
   const n = parseInt(value);
   return Number.isInteger(n) && n >= 0 ? n : 10;
+}
+
+// Stage 20: resolves whatever the Product/restock forms submit for
+// "supplier" into either a real Supplier _id or null (self-purchased /
+// NoSupplier). Rejects anything that isn't a valid, *existing* Supplier
+// id — per Stage 20's exit criteria, an arbitrary/stale id must 400, not
+// be silently accepted or silently coerced to null.
+async function resolveSupplierId(rawSupplierId) {
+  if (!rawSupplierId || rawSupplierId === NO_SUPPLIER) return { ok: true, value: null };
+  if (!mongoose.Types.ObjectId.isValid(rawSupplierId)) return { ok: false };
+  const exists = await Supplier.exists({ _id: rawSupplierId });
+  return exists ? { ok: true, value: rawSupplierId } : { ok: false };
 }
 
 // ── Auth ─────────────────────────────────────────────────────
@@ -138,8 +159,8 @@ app.get('/api/products', requireAuth, asyncHandler(async (req, res) => {
 
   const data = await Product.find(
     filter,
-    'productID productName category sellingPriceHistory buyingPriceHistory quantity reserved lowStockThreshold supplier'
-  );
+    'productID productName category sellingPriceHistory buyingPriceHistory quantity reserved lowStockThreshold supplierID'
+  ).populate('supplierID', 'supplierName');
   const mapped = data.map((p) => {
     const available = p.quantity - p.reserved;
     return {
@@ -152,7 +173,12 @@ app.get('/api/products', requireAuth, asyncHandler(async (req, res) => {
       available,
       lowStockThreshold: p.lowStockThreshold,
       lowStock: available <= p.lowStockThreshold,
-      supplier: p.supplier,
+      // Stage 20: p.supplierID is populated to {_id, supplierName} when
+      // set, or null for self-purchased/no-supplier products — surfaced
+      // as two plain fields so the frontend combobox doesn't need to know
+      // about Mongoose population shapes.
+      supplierId: p.supplierID?._id || null,
+      supplierName: p.supplierID?.supplierName || null,
       sellingPriceHistory: p.sellingPriceHistory,
       price: roundMoney(getLatestSellingPrice(p)),
       costPrice: roundMoney(getLatestBuyingPrice(p)),
@@ -224,13 +250,17 @@ app.get('/api/customers', requireAuth, asyncHandler(async (req, res) => {
 // specific actions like edits/refunds in a later stage.)
 
 app.post('/api/product', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
-  const { productId, productName, category, price, stock, supplier, already, lowStockThreshold } = req.body;
+  const { productId, productName, category, price, stock, supplierId, already, lowStockThreshold } = req.body;
 
   if (!isValidProductId(productId)) {
     return res.status(400).json({ success: false, message: 'Product ID must look like #0001.' });
   }
   if (!productName || !productName.trim()) {
     return res.status(400).json({ success: false, message: 'Product name is required.' });
+  }
+  const resolvedSupplier = await resolveSupplierId(supplierId);
+  if (!resolvedSupplier.ok) {
+    return res.status(400).json({ success: false, message: 'Invalid supplier selected.' });
   }
 
   const submittedPrice = roundMoney(price);
@@ -245,7 +275,7 @@ app.post('/api/product', requireAuth, requireAdmin, asyncHandler(async (req, res
     existingProduct.quantity = updatedStock;
     existingProduct.productName = productName;
     existingProduct.category = category;
-    existingProduct.supplier = supplier || 'N/A';
+    existingProduct.supplierID = resolvedSupplier.value;
     if (lowStockThreshold !== undefined) existingProduct.lowStockThreshold = threshold;
 
     // Only record a new price-history entry if the price actually moved —
@@ -273,7 +303,7 @@ app.post('/api/product', requireAuth, requireAdmin, asyncHandler(async (req, res
       quantity: isNaN(parseInt(stock)) ? 0 : parseInt(stock),
       reserved: 0,
       lowStockThreshold: threshold,
-      supplier: supplier || 'N/A',
+      supplierID: resolvedSupplier.value,
     });
     await newProduct.save();
     await logAudit({
@@ -310,8 +340,12 @@ app.delete('/product/:productID', requireAuth, requireAdmin, asyncHandler(async 
 }));
 
 app.post('/product/undo', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
-  const { productId, productName, category, price, stock, supplier, lowStockThreshold } = req.body;
+  const { productId, productName, category, price, stock, supplierId, lowStockThreshold } = req.body;
   const threshold = parseThreshold(lowStockThreshold);
+  const resolvedSupplier = await resolveSupplierId(supplierId);
+  if (!resolvedSupplier.ok) {
+    return res.status(400).json({ success: false, message: 'Invalid supplier selected.' });
+  }
 
   const existingProduct = await Product.findOne({ productID: productId });
   const beforeSnapshot = existingProduct ? existingProduct.toObject() : null;
@@ -323,7 +357,7 @@ app.post('/product/undo', requireAuth, requireAdmin, asyncHandler(async (req, re
     existingProduct.quantity = isNaN(parseInt(stock)) ? 0 : parseInt(stock);
     existingProduct.reserved = 0; // a restored product starts with nothing held in any open cart
     existingProduct.lowStockThreshold = threshold;
-    existingProduct.supplier = supplier || 'N/A';
+    existingProduct.supplierID = resolvedSupplier.value;
     await existingProduct.save();
     restoredProduct = existingProduct;
   } else {
@@ -335,7 +369,7 @@ app.post('/product/undo', requireAuth, requireAdmin, asyncHandler(async (req, re
       quantity: isNaN(parseInt(stock)) ? 0 : parseInt(stock),
       reserved: 0,
       lowStockThreshold: threshold,
-      supplier: supplier || 'N/A',
+      supplierID: resolvedSupplier.value,
     });
     await newProduct.save();
     restoredProduct = newProduct;
@@ -956,13 +990,24 @@ async function generateUniquePurchaseId() {
   throw new AppError(500, 'Could not generate a unique purchase ID. Please try again.');
 }
 
-// Records a restock from a supplier: creates the purchase record (with its
-// own payment/balance tracking, mirroring Order), increments stock, and
-// appends to each product's buyingPriceHistory — all atomically, same
-// transaction pattern as POST /billing/orderDetails (Stage 3/4), since
-// this touches money and stock together just like a sale does.
+// Records a restock: creates the purchase record (with its own payment/
+// balance tracking, mirroring Order), increments stock, and appends to
+// each product's buyingPriceHistory — all atomically, same transaction
+// pattern as POST /billing/orderDetails (Stage 3/4), since this touches
+// money and stock together just like a sale does.
+//
+// Stage 20: `supplierName === NO_SUPPLIER` is the self-purchased/
+// "Buy Myself" path — same sentinel-string pattern as WALKIN_CUSTOMER.
+// It skips the Supplier lookup and the $push into a Supplier document
+// entirely (there's no supplier to owe money to, and Stage 20 explicitly
+// says not to invent a fake Supplier record just to complete a
+// purchase); stock and buyingPriceHistory still update exactly the same
+// as a real-supplier purchase, just with supplierID: null. Because there's
+// no Supplier.purchases entry, a self-purchase won't show up in any
+// supplier's purchase-history table — it's not attached to one, by design.
 app.post('/supplier/purchase', requireAuth, asyncHandler(async (req, res) => {
   const { supplierName, items, amountPaid } = req.body;
+  const isSelfPurchase = supplierName === NO_SUPPLIER;
 
   if (!supplierName || !supplierName.trim()) {
     return res.status(400).json({ success: false, message: 'Supplier is required.' });
@@ -982,9 +1027,12 @@ app.post('/supplier/purchase', requireAuth, asyncHandler(async (req, res) => {
     }
   }
 
-  const supplier = await Supplier.findOne({ supplierName: supplierName.trim().replace(/\s+/g, ' ') });
-  if (!supplier) {
-    return res.status(400).json({ success: false, message: `Supplier "${supplierName}" not found.` });
+  let supplier = null;
+  if (!isSelfPurchase) {
+    supplier = await Supplier.findOne({ supplierName: supplierName.trim().replace(/\s+/g, ' ') });
+    if (!supplier) {
+      return res.status(400).json({ success: false, message: `Supplier "${supplierName}" not found.` });
+    }
   }
 
   const cleanItems = items.map((it) => ({
@@ -993,8 +1041,10 @@ app.post('/supplier/purchase', requireAuth, asyncHandler(async (req, res) => {
     unitCost: roundMoney(it.unitCost),
   }));
   const totalAmount = roundMoney(cleanItems.reduce((sum, it) => sum + it.unitCost * it.quantity, 0));
-  const paid = roundMoney(Math.min(Math.max(Number(amountPaid) || 0, 0), totalAmount));
-  const balanceDue = roundMoney(Math.max(0, totalAmount - paid));
+  // Amount-owed tracking only makes sense against a real supplier — a
+  // self-purchase has no one to owe money to.
+  const paid = isSelfPurchase ? totalAmount : roundMoney(Math.min(Math.max(Number(amountPaid) || 0, 0), totalAmount));
+  const balanceDue = isSelfPurchase ? 0 : roundMoney(Math.max(0, totalAmount - paid));
   const purchaseID = await generateUniquePurchaseId();
 
   const session = await mongoose.startSession();
@@ -1006,24 +1056,32 @@ app.post('/supplier/purchase', requireAuth, asyncHandler(async (req, res) => {
           throw new AppError(400, `Product ${item.productID} no longer exists.`);
         }
         product.quantity += item.quantity;
-        product.buyingPriceHistory.push({ price: item.unitCost, date: new Date(), supplierID: supplier._id });
+        product.buyingPriceHistory.push({
+          price: item.unitCost,
+          date: new Date(),
+          supplierID: isSelfPurchase ? null : supplier._id,
+        });
         await product.save({ session });
       }
 
-      await Supplier.updateOne(
-        { _id: supplier._id },
-        { $push: { purchases: { purchaseID, totalAmount, amountPaid: paid, balanceDue, items: cleanItems } } },
-        { session }
-      );
+      if (!isSelfPurchase) {
+        await Supplier.updateOne(
+          { _id: supplier._id },
+          { $push: { purchases: { purchaseID, totalAmount, amountPaid: paid, balanceDue, items: cleanItems } } },
+          { session }
+        );
+      }
 
       await logAudit(
         {
-          action: 'supplier.purchase',
+          action: isSelfPurchase ? 'product.restocked' : 'supplier.purchase',
           actor: { username: req.user.username, role: req.user.role },
-          targetType: 'supplier',
-          targetId: supplier.supplierName,
+          targetType: isSelfPurchase ? 'product' : 'supplier',
+          targetId: isSelfPurchase ? NO_SUPPLIER : supplier.supplierName,
           before: null,
-          after: { purchaseID, supplierName: supplier.supplierName, items: cleanItems, totalAmount, amountPaid: paid, balanceDue },
+          after: isSelfPurchase
+            ? { purchaseID, supplierName: NO_SUPPLIER, items: cleanItems, totalAmount }
+            : { purchaseID, supplierName: supplier.supplierName, items: cleanItems, totalAmount, amountPaid: paid, balanceDue },
         },
         session
       );
@@ -1032,7 +1090,11 @@ app.post('/supplier/purchase', requireAuth, asyncHandler(async (req, res) => {
     await session.endSession();
   }
 
-  res.status(201).json({ success: true, message: 'Purchase recorded and stock updated.', purchaseID, totalAmount, amountPaid: paid, balanceDue });
+  res.status(201).json(
+    isSelfPurchase
+      ? { success: true, message: 'Self-purchased stock recorded.', purchaseID, totalAmount, selfPurchase: true }
+      : { success: true, message: 'Purchase recorded and stock updated.', purchaseID, totalAmount, amountPaid: paid, balanceDue }
+  );
 }));
 // ── Orders: list/detail (Stage 7) ───────────────────────────
 

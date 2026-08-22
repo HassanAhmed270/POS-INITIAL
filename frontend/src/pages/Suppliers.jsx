@@ -8,6 +8,12 @@ import { formatMoney } from '../lib/money';
 import { useDebouncedValue } from '../lib/useDebouncedValue';
 import { useAuth } from '../lib/AuthContext';
 
+// Stage 20: the self-purchased/no-supplier sentinel — must match
+// NO_SUPPLIER in main.js exactly, same pattern as WALKIN_CUSTOMER
+// (Stage 19). Sent straight through as `supplierName`; main.js's
+// POST /supplier/purchase special-cases this exact string to skip the
+// Supplier lookup/purchase record entirely instead of 404ing.
+const NO_SUPPLIER = 'NoSupplier';
 const emptySupplierForm = { supplierName: '', contactPerson: '', phone: '', email: '', address: '' };
 const emptyPurchaseForm = { supplierName: '', productId: '', quantity: '', unitCost: '', amountPaid: '' };
 const PAGE_SIZE = 10;
@@ -136,7 +142,11 @@ export default function Suppliers() {
         items: [{ productID: productId, quantity: qty, unitCost: cost }],
         amountPaid: parseFloat(amountPaid) || 0,
       });
-      alert(`Purchase ${data.purchaseID} recorded. Balance due to supplier: ${formatMoney(data.balanceDue)}`);
+      alert(
+        data.selfPurchase
+          ? `Purchase ${data.purchaseID} recorded (self-purchased, no supplier balance).`
+          : `Purchase ${data.purchaseID} recorded. Balance due to supplier: ${formatMoney(data.balanceDue)}`
+      );
       setPurchaseForm(emptyPurchaseForm);
       await reloadEverything();
     } catch (err) {
@@ -309,6 +319,7 @@ export default function Suppliers() {
                   className="border rounded px-3 py-2 w-full"
                 >
                   <option value="">Select supplier</option>
+                  <option value={NO_SUPPLIER}>🛠 NoSupplier — Buy Myself / Self Purchased</option>
                   {allSuppliers.map((s) => (
                     <option key={s.supplierName} value={s.supplierName}>{s.supplierName}</option>
                   ))}
@@ -353,18 +364,20 @@ export default function Suppliers() {
                   className="border rounded px-3 py-2 w-full"
                 />
               </div>
-              <div>
-                <label className="block mb-1 font-medium">Amount Paid</label>
-                <input
-                  type="number"
-                  step="0.01"
-                  min="0"
-                  value={purchaseForm.amountPaid}
-                  onChange={(e) => setPurchaseForm({ ...purchaseForm, amountPaid: e.target.value })}
-                  placeholder="0 = full credit"
-                  className="border rounded px-3 py-2 w-full"
-                />
-              </div>
+              {purchaseForm.supplierName !== NO_SUPPLIER && (
+                <div>
+                  <label className="block mb-1 font-medium">Amount Paid</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={purchaseForm.amountPaid}
+                    onChange={(e) => setPurchaseForm({ ...purchaseForm, amountPaid: e.target.value })}
+                    placeholder="0 = full credit"
+                    className="border rounded px-3 py-2 w-full"
+                  />
+                </div>
+              )}
               <div className="md:col-span-5">
                 <button type="submit" className="px-4 py-2 bg-brand-green text-white rounded hover:bg-green-700">
                   Record Purchase

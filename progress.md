@@ -423,6 +423,122 @@ against a real database or in a real browser. Recommend a manual pass
 (log in as both roles, try Products/Suppliers mutations as a worker, run
 a walk-in sale through Billing) before treating this fully closed.
 
+## Stage 20 — Supplier Selection & `NoSupplier` / Self-Purchased Stock
+
+`Product.supplier` (a free-text string, default `'N/A'`) is gone,
+replaced by `Product.supplierID` (`ObjectId ref: 'Supplier'`, default
+`null`). This is a **breaking schema change** for any pre-Stage-20 data
+that had a plain string in `supplier` — there's no migration script,
+since this sandbox has no live database to migrate and Stage 20's own
+exit criteria explicitly calls for a real reference, not an arbitrary
+string. On a real deployment, existing products will show "NoSupplier"
+until an admin re-selects a real one from the new combobox. Flagging this
+plainly rather than assuming it's fine — worth a quick check against real
+data before merging.
+
+**`NO_SUPPLIER = 'NoSupplier'`** is a new sentinel constant in `main.js`,
+mirroring Stage 19's `WALKIN_CUSTOMER` exactly: a plain string, defined
+identically in `main.js`, `Products.jsx`, and `Suppliers.jsx` (each side
+comments where its counterpart lives), sent through as a normal form
+value rather than a special code. It represents stock the business
+bought itself, with no external supplier involved.
+
+**`resolveSupplierId(rawSupplierId)`** (new helper in `main.js`) is the
+single place that turns whatever a form submits into either a real
+Supplier `_id` or `null`: empty/`undefined`/`NO_SUPPLIER` → `null`;
+anything else must be a valid ObjectId that actually matches an existing
+`Supplier` document, or the request 400s with "Invalid supplier
+selected." — an arbitrary or stale id is rejected, not silently accepted
+or silently coerced to null, per the exit criteria.
+
+**Product create/update/undo** (`POST /api/product`, `POST
+/product/undo`) now take `supplierId` instead of `supplier`, resolved
+through the helper above before being written to
+`existingProduct.supplierID` / `newProduct.supplierID`.
+
+**`GET /api/products`** now `.populate('supplierID', 'supplierName')`
+and returns two plain fields, `supplierId` and `supplierName` (`null` for
+self-purchased products), instead of the old raw `supplier` string — the
+frontend combobox doesn't need to know about Mongoose population shapes.
+
+**Restocking (`POST /supplier/purchase`) supports both paths**:
+`supplierName` naming a real supplier still runs the original flow
+unchanged (Supplier lookup, `$push` into `Supplier.purchases[]`, standard
+payment/balance tracking). `supplierName === NO_SUPPLIER` is the new
+self-purchase path: skips the `Supplier.findOne` lookup and the
+`Supplier.purchases[]` push entirely — no fake Supplier document is
+created just to record the purchase (per the exit criteria) — but still
+updates `Product.quantity` and pushes a `buyingPriceHistory` entry
+(`supplierID: null`) for every item, inside the exact same
+`session.withTransaction()` block as the real-supplier path, so a
+self-purchase across several items stays atomic just like a real one.
+Amount-paid/balance-due tracking is skipped for self-purchases (there's
+no one to owe money to) — the response carries `selfPurchase: true`
+instead of `amountPaid`/`balanceDue`, and the frontend hides the "Amount
+Paid" input when `NoSupplier` is selected. Audit logging distinguishes
+the two: `supplier.purchase` (existing) vs. a new `product.restocked`
+action for self-purchases, targeting `'product'`/`NO_SUPPLIER` since
+there's no supplier document to target.
+
+**Deliberate scope boundary**: recording a restock — from a real
+supplier or self-purchased — does **not** change `Product.supplierID`.
+The product's declared "current supplier" is set only via the Products
+form; restocking is inventory work, same reasoning Stage 19 already used
+to keep `/supplier/purchase` worker-accessible rather than admin-gated.
+This means a self-purchased restock for a product that *does* have a
+declared supplier is legitimate and doesn't silently overwrite that
+relationship. `Supplier.deleteOne` continuing to leave existing
+`buyingPriceHistory[].supplierID` references alone (Stage 5/19 behavior,
+noted again here) extends naturally to `Product.supplierID` too — deleting
+a supplier a product currently points at leaves a dangling reference
+rather than silently reassigning it to something else; not treated as
+this stage's problem to solve, since the exit criteria's concern is
+historical purchase records specifically, not the live pointer.
+
+**Frontend**: `Products.jsx`'s Supplier field is now a `<select>`,
+populated from `GET /api/suppliers` (same `allSuppliers` list-fetch
+pattern `Suppliers.jsx` already used for its own dropdowns), defaulting
+to the NoSupplier option; `emptyForm.supplierId` defaults to
+`NO_SUPPLIER` rather than an empty required field. `Suppliers.jsx`'s
+existing restock-form supplier `<select>` gained a NoSupplier option
+alongside the real supplier list; the "Amount Paid" input is conditionally
+hidden when it's selected, and the post-submit alert branches on
+`data.selfPurchase` to skip mentioning a supplier balance that doesn't
+apply.
+
+**Verified:** `node --check` clean on `main.js` and `models/Product.js`.
+`npm run build` and `npm run lint` clean on the frontend — same one
+pre-existing unrelated `AuthContext.jsx` warning as every prior stage, no
+new ones. Live boot test (single `bash_tool` call, no MongoDB in this
+sandbox): unauthenticated → 401 unchanged; worker token against
+`POST /api/product` and `DELETE /supplier/:supplierName` → 403 "Admins
+only." unchanged (regression); admin token with a syntactically-invalid
+`supplierId` → clean 400 "Invalid supplier selected." **before any DB
+call**, confirming `resolveSupplierId()`'s reject-path doesn't depend on
+a live database; admin token with `supplierId: "NoSupplier"`, worker
+token with `supplierName: "NoSupplier"` against `/supplier/purchase`,
+and worker token against `GET /api/products` all passed their auth/role
+gates correctly and then hit the expected DB-buffering timeout (no
+replica set here, same limitation as every stage since 12) — critically,
+the server **stayed up and kept responding correctly** to a request made
+immediately afterward, so the self-purchase transaction path doesn't
+crash the process even when it can't reach a database.
+
+**Not verified:** no live MongoDB replica set or real browser in this
+sandbox — the actual DB-backed behavior (a real supplier combobox
+populated and submitted end-to-end, a self-purchase restock actually
+incrementing stock and appending to `buyingPriceHistory`, a real-supplier
+restock still working unchanged, an invalid-but-well-formed ObjectId
+correctly rejected once a live DB can actually check for existence, the
+"NoSupplier" self-purchase correctly *not* appearing in any supplier's
+purchase-history table) is code-reviewed and auth/validation-gate-tested
+only. Recommend a manual pass against a real replica set (create a
+product via the new combobox, restock it both from a real supplier and
+via NoSupplier, confirm stock/price history and the Suppliers screen all
+reflect it correctly) before treating this fully closed. Also recommend
+double-checking any existing production products' `supplier` string
+values before merging, given the breaking-schema-change note above.
+
 ## Route Inventory — End of Stage 15
 
 **Public:** `POST /auth/login`, `POST /billing/orderid`
@@ -460,10 +576,10 @@ supports `range=week|month|year`. Exports: `summary`, `sales`, `refunds`,
 
 ## Current Status
 
-Stages 1–17 and 19 implemented (Stage 18, desktop distribution, remains
-deliberately skipped/deferred — see the note at the top of its Stage 19
-entry above). Stage 11 **end-to-end verified in a real browser +
-database**. Stages 1–10/12–17/19 verified by
+Stages 1–17 and 19–20 implemented (Stage 18, desktop distribution,
+remains deliberately skipped/deferred — see the note at the top of its
+Stage 19 entry above). Stage 11 **end-to-end verified in a real browser +
+database**. Stages 1–10/12–17/19–20 verified by
 build/lint/`node --check`/boot-test/unit-test per stage above — DB paths
 past the auth gate are code-reviewed only (no replica set in this
 sandbox), Stage 16's responsive layout and Stage 17's print/preview
@@ -473,6 +589,10 @@ this sandbox either — see Stage 16/17 above). EJS removal complete and
 verified. Remaining items are deliberate scope limitations and
 security/stress-testing/manual-check follow-ups unless a new spec adds
 scope.
+
+Stage 20 also carries a **breaking schema change** (`Product.supplier`
+string → `Product.supplierID` reference) with no migration path in this
+sandbox — see the Stage 20 entry above before merging against real data.
 
 Stage 15's browser push follow-up (real OS-level alerts) remains an
 explicitly deferred stretch goal, not scheduled.

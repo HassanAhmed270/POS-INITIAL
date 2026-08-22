@@ -38,7 +38,16 @@ const productSchema = new Schema({
     }
   ],
   buyingDate: { type: Date, default: Date.now },
-  supplier: { type: String },
+  // Which supplier this product is currently sourced from (Stage 20) — a
+  // real reference to a Supplier document, not an arbitrary string like
+  // the old `supplier` field this replaces. null means self-purchased /
+  // no supplier (the "NoSupplier" sentinel on the frontend and in
+  // main.js's NO_SUPPLIER constant — see resolveSupplierId()). This is
+  // the product's *current* declared supplier, distinct from each
+  // buyingPriceHistory entry's own `supplierID`, which is a per-purchase
+  // historical snapshot that does not change retroactively when this
+  // field does.
+  supplierID: { type: Schema.Types.ObjectId, ref: 'Supplier', default: null },
   hidden: { type: Boolean, default: false }
 });
 

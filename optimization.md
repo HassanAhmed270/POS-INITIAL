@@ -154,7 +154,7 @@ The worker/cashier role should be restricted from managing inventory master data
 
 ---
 
-## Stage 20 — Supplier Selection & `NoSupplier` / Self-Purchased Stock
+## Stage 20 — Supplier Selection & `NoSupplier` / Self-Purchased Stock — done, see `progress.md`
 
 *Depends on Stage 19's permission model and the existing Product/Supplier models.*
 

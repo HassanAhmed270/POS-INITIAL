@@ -8,7 +8,12 @@ import { formatMoney } from '../lib/money';
 import { useDebouncedValue } from '../lib/useDebouncedValue';
 import { useAuth } from '../lib/AuthContext';
 
-const emptyForm = { productId: '', productName: '', category: '', price: '', stock: '', supplier: '', lowStockThreshold: '' };
+// Stage 20: the self-purchased/no-supplier sentinel — must match
+// NO_SUPPLIER in main.js exactly, since this string is sent straight
+// through as `supplierId` (main.js's resolveSupplierId() treats it the
+// same as an empty value: stored as null, no Supplier record required).
+const NO_SUPPLIER = 'NoSupplier';
+const emptyForm = { productId: '', productName: '', category: '', price: '', stock: '', supplierId: NO_SUPPLIER, lowStockThreshold: '' };
 const PAGE_SIZE = 10;
 
 export default function Products() {
@@ -17,6 +22,10 @@ export default function Products() {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // Full, unpaginated supplier list — used only to populate the Supplier
+  // combobox below (Stage 20), same pattern as Suppliers.jsx's
+  // allSuppliers/allProducts dropdown data.
+  const [allSuppliers, setAllSuppliers] = useState([]);
 
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebouncedValue(search, 300);
@@ -49,6 +58,19 @@ export default function Products() {
       setLoading(false);
     }
   };
+
+  const loadSuppliers = async () => {
+    try {
+      const data = await api.getSuppliers({ limit: 1000 });
+      setAllSuppliers(data.suppliers || []);
+    } catch (err) {
+      console.error('Failed to load suppliers:', err.message);
+    }
+  };
+
+  useEffect(() => {
+    loadSuppliers();
+  }, []);
 
   useEffect(() => {
     loadProducts();
@@ -88,7 +110,7 @@ export default function Products() {
       category: p.category,
       price: p.price ?? '',
       stock: '',
-      supplier: p.supplier || '',
+      supplierId: p.supplierId || NO_SUPPLIER,
       lowStockThreshold: p.lowStockThreshold ?? 10,
     });
     setAlready(p.quantity);
@@ -122,7 +144,7 @@ export default function Products() {
           category: p.category,
           price: p.price ?? 0,
           stock: p.quantity,
-          supplier: p.supplier,
+          supplierId: p.supplierId || NO_SUPPLIER,
           lowStockThreshold: p.lowStockThreshold ?? 10,
         },
       ]);
@@ -292,13 +314,16 @@ export default function Products() {
                   </div>
                   <div>
                     <label className="block mb-1 font-medium">Supplier</label>
-                    <input
-                      type="text"
-                      value={form.supplier}
-                      onChange={(e) => setForm({ ...form, supplier: e.target.value })}
-                      placeholder="Enter supplier name"
+                    <select
+                      value={form.supplierId}
+                      onChange={(e) => setForm({ ...form, supplierId: e.target.value })}
                       className="border rounded px-3 py-2 w-full"
-                    />
+                    >
+                      <option value={NO_SUPPLIER}>🛠 NoSupplier — Buy Myself / Self Purchased</option>
+                      {allSuppliers.map((s) => (
+                        <option key={s._id} value={s._id}>{s.supplierName}</option>
+                      ))}
+                    </select>
                   </div>
                   <div>
                     <label className="block mb-1 font-medium">Low Stock Alert Threshold</label>

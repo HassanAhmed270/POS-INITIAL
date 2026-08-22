@@ -80,7 +80,9 @@ the old token.
     a price *history*, not a scalar — see `lib/pricing.js`'s
     `getLatestSellingPrice`/`getLatestBuyingPrice`), `quantity`,
     `reserved` (Stage 3 — units held by in-progress carts, not yet
-    committed), `lowStockThreshold`.
+    committed), `lowStockThreshold`, `supplierID` (Stage 20 — `ObjectId
+    ref: 'Supplier'`, nullable; replaces the old free-text `supplier`
+    string — see below).
   - `Order.js` — `orderID` (`#0000`), `customerName`, `products` (embedded
     `{productID, quantity, amount, discount, discountType,
     discountAmount}`), `cashier`, `totalAmount`, `amountPaid`,
@@ -200,6 +202,28 @@ works; `main.js` logs a warning at boot and there's just no UI to serve.
   unchanged — a walk-in sale is a fully real, fully audited `Order`, it's
   just never attached to a `Customer` document, so it can never
   contribute to a credit account or customer-order-history report.
+- **Supplier is a real reference, not a free-text string (Stage 20)**:
+  `Product.supplierID` (`ObjectId ref: 'Supplier'`, nullable) replaces the
+  old `supplier` string field. `NO_SUPPLIER = 'NoSupplier'` is a plain
+  sentinel string, defined identically in `main.js`, `Products.jsx`, and
+  `Suppliers.jsx` — same pattern as `WALKIN_CUSTOMER` (Stage 19).
+  `resolveSupplierId()` (`main.js`) is the one place that turns a
+  submitted `supplierId` into either a real Supplier `_id` or `null`:
+  empty/`NO_SUPPLIER` → `null`; anything else must be a valid,
+  *existing* Supplier id or the request 400s — never silently accepted or
+  silently coerced. `POST /supplier/purchase` (restock) accepts
+  `supplierName === NO_SUPPLIER` as a self-purchase path that skips the
+  Supplier lookup and `Supplier.purchases[]` push entirely (no fake
+  Supplier document gets created) but still updates stock and
+  `buyingPriceHistory` (with `supplierID: null`) atomically in the same
+  transaction as a real-supplier purchase. Recording a restock — from a
+  real supplier or self-purchased — deliberately does **not** change
+  `Product.supplierID`; the product's declared current supplier is only
+  ever set via the Products form, restocking is inventory work, same
+  reasoning Stage 19 used to keep `/supplier/purchase`
+  worker-accessible. This is a breaking schema change for any pre-Stage-
+  20 data with a plain string in the old `supplier` field — there's no
+  migration script (see `progress.md`'s Stage 20 entry).
 - **Two receipt layouts, one commit path (Stage 17)**: `Billing.jsx` has
   `printReceiptFor` (the original plain-table layout) and
   `printSpecialReceiptFor` (catering-invoice-style layout, added Stage
