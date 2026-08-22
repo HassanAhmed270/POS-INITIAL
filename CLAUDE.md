@@ -262,6 +262,22 @@ works; `main.js` logs a warning at boot and there's just no UI to serve.
   intentional; the durable record of the change is
   `Product.sellingPriceHistory` itself plus the action's audit-log entry,
   not a second copy on the supplier's purchase history.
+- **Supplier overpayment becomes rolling credit, not a discarded
+  remainder**: `Supplier.creditBalance` (`min: 0`, default 0) tracks what
+  a supplier currently owes *us* from having been overpaid on a past
+  purchase. `POST /supplier/purchase` applies any existing credit to a
+  new purchase's total *before* computing what's owed
+  (`creditApplied = min(existingCredit, totalAmount)`), and only paying
+  more than what's left after that (`netOwed`) creates *further* credit —
+  read/written on the supplier document inside the same session/
+  transaction as the stock update, never as a negative `balanceDue` on
+  an individual purchase (that field stays `min: 0`, floored). Each
+  purchase snapshots how much credit it consumed in its own
+  `creditApplied` field, for audit purposes only — never re-read or
+  re-applied later. `amountPaid` is no longer capped at the purchase
+  total; it's validated (finite, ≥0) the same way item fields are, and
+  recorded as exactly what was submitted. Self-purchases have no
+  Supplier document and therefore no credit concept at all.
 - **Money rounding**: use `roundMoney()` (`lib/money.js`) on every
   computed amount before storing or comparing — floating-point drift
   across many small discounts/payments is the usual source of "off by a

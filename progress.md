@@ -614,6 +614,99 @@ both with and without a selling price, confirm Products/Billing reflect
 it correctly and history arrays grow as expected) before treating this
 fully closed.
 
+## Post-Stage-21 Fix — Supplier Restock: Overpayment Credit + Auto-Filled Amount Paid
+
+Reported while manually testing Stage 21's restock form: recording a
+purchase with Amount Paid greater than the purchase total (e.g. $120
+paid against a $100 total) showed "Balance due to supplier: $0.00" —
+correct on its face, but the $20 overpayment wasn't tracked anywhere.
+Root cause: `POST /supplier/purchase` clamped `paid` to
+`Math.min(amountPaid, totalAmount)` before computing `balanceDue`, so
+anything paid beyond the total was silently discarded rather than
+recorded. Confirmed by reading the exact line — not a maybe-bug.
+
+**Design decision (asked, not assumed):** offered three options —
+reject overpayment outright, track it as rolling supplier credit, or
+something else. Chosen: **track it as credit that automatically reduces
+what's owed on the supplier's next purchase.**
+
+**Backend (`models/Supplier.js`, `main.js`)**:
+- `Supplier` gained `creditBalance` (`min: 0`, default 0) — a running
+  total of what a given supplier currently owes *us* from a past
+  overpayment. Purchase sub-schema gained `creditApplied` (`min: 0`,
+  default 0), recorded per-purchase for audit/transparency only — never
+  re-read or re-applied after the fact, it's a snapshot of what happened
+  at the time.
+- `POST /supplier/purchase`: `amountPaid` is no longer capped at the
+  purchase total — it's now validated the same way item fields are
+  (finite, ≥0 when present; blank/omitted still means "0 paid", but
+  garbage input now 400s instead of silently becoming 0). Inside the
+  existing `session.withTransaction()`, the supplier document is
+  re-fetched via the session (not reused from the pre-transaction lookup,
+  to avoid a stale `creditBalance` under concurrent purchases) and the
+  math runs: existing credit is applied to the new total first
+  (`creditApplied = min(existingCredit, totalAmount)`), what's left after
+  that is `netOwed`, and only paying *more than netOwed* creates new
+  credit (`overpay = max(0, paidInput - netOwed)`,
+  `newCreditBalance = existingCredit - creditApplied + overpay`). A
+  single purchase's own `balanceDue` still never goes negative — credit
+  always lives on the supplier document, not as a negative number on one
+  purchase row. `Supplier.creditBalance` and the new purchase (with its
+  `creditApplied` snapshot) are written in a single `$set`+`$push`
+  `updateOne` inside the transaction, alongside the stock/price-history
+  updates from Stage 21 — same atomicity, nothing new touches a separate
+  write. Self-purchases (`NO_SUPPLIER`) are unaffected — there's no
+  Supplier document for them, so no credit concept applies, same as
+  before.
+- `GET /api/suppliers` now also returns `creditBalance` per supplier —
+  deliberately separate from `totalBalanceDue` (what we owe them vs. what
+  they owe us); a supplier can carry both at once if purchases happened
+  in that order.
+
+**Frontend (`Suppliers.jsx`)**: two changes, one requested alongside the
+bug report —
+- **Amount Paid now auto-fills** with quantity × cost (the purchase
+  total) whenever either changes, defaulting the form to "pay in full"
+  instead of starting blank — but stays fully editable; typing a
+  different number is tracked (`autoFilledPaid` ref) so a manual edit is
+  never silently overwritten by a later quantity/cost tweak, only a
+  fresh, still-untouched auto-fill is.
+- Supplier list gained a **Credit** column (green, only shown when > 0);
+  the expandable purchase-history sub-table gained a **Credit Applied**
+  column. The post-submit alert now explicitly states when existing
+  credit was applied to a purchase and when a new credit balance was
+  created from overpayment, instead of just showing a bare balance-due
+  figure that made $0.00 look like "nothing happened."
+
+**Verified:** `node --check` clean on `main.js` and `models/Supplier.js`.
+`npm run build`/`npm run lint` clean on the frontend (same one
+pre-existing unrelated `AuthContext.jsx` warning, no new ones). The
+credit-math formula itself was unit-verified standalone (7 scenarios:
+exact payment, underpay, the exact reported overpay bug, existing credit
+exactly covering a new total, existing credit exceeding a new total and
+rolling forward the remainder, existing credit plus additional cash
+stacking further credit, and zero payment) — all balanceDue/creditApplied/
+newCreditBalance values came out algebraically consistent
+(`totalAmount = creditApplied + balanceDue + paid − overpayPortion` holds
+in every case). Live boot test (single `bash_tool` call, no MongoDB in
+this sandbox): a non-numeric or negative `amountPaid` → clean 400s before
+any DB call (confirms the new validation guard doesn't depend on a live
+database); a valid overpayment payload and a payload omitting
+`amountPaid` entirely both passed every gate and reached the expected
+DB-buffering timeout (no replica set here); server stayed up and kept
+responding correctly to requests made immediately afterward
+(`GET /api/suppliers` → 401 no token, unchanged).
+
+**Not verified:** no live MongoDB replica set or real browser in this
+sandbox — the actual DB-backed behavior (an overpayment really showing up
+as `creditBalance` on `GET /api/suppliers`, that credit really being
+consumed on the supplier's next restock, the new Credit/Credit Applied
+columns and the auto-filled Amount Paid field rendering and behaving
+correctly in a real browser) is code-reviewed, unit-math-verified, and
+validation-gate-tested only. This is exactly what's being manually tested
+now — recommend confirming the scenarios above against a real replica set
+before treating it fully closed.
+
 ## Route Inventory — End of Stage 15
 
 **Public:** `POST /auth/login`, `POST /billing/orderid`

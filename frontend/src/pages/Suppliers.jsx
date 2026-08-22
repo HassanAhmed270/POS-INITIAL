@@ -1,10 +1,10 @@
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import Sidebar from '../components/Sidebar';
 import Topbar from '../components/Topbar';
 import SortableHeader from '../components/SortableHeader';
 import Pagination from '../components/Pagination';
 import { api } from '../lib/api';
-import { formatMoney } from '../lib/money';
+import { formatMoney, roundMoney } from '../lib/money';
 import { useDebouncedValue } from '../lib/useDebouncedValue';
 import { useAuth } from '../lib/AuthContext';
 
@@ -56,6 +56,30 @@ export default function Suppliers() {
   // getLatestBuyingPrice() — see GET /api/products in main.js). Keeping
   // these visibly distinct in the UI is the point of Stage 21 item 15.
   const previousSellingPrice = selectedPurchaseProduct?.price ?? null;
+
+  // Credit-fix follow-up: Amount Paid now auto-fills with quantity ×
+  // cost (the purchase total) whenever either changes, so the field
+  // reflects "pay in full" by default instead of starting blank — but
+  // stays fully editable for a deliberate partial payment or an
+  // intentional overpayment. `autoFilledPaid` tracks the value *we* last
+  // wrote in, so the effect below only overwrites the field when it
+  // still matches what we auto-filled (i.e. the admin hasn't typed their
+  // own number since) — editing amountPaid by hand always wins.
+  const autoFilledPaid = useRef('');
+  useEffect(() => {
+    const qty = parseInt(purchaseForm.quantity);
+    const cost = parseFloat(purchaseForm.unitCost);
+    const computedTotal = Number.isInteger(qty) && qty > 0 && Number.isFinite(cost) && cost >= 0 ? roundMoney(qty * cost) : '';
+    setPurchaseForm((prev) => {
+      if (prev.amountPaid !== '' && prev.amountPaid !== autoFilledPaid.current) {
+        // Admin typed their own value — leave it alone.
+        return prev;
+      }
+      autoFilledPaid.current = computedTotal === '' ? '' : String(computedTotal);
+      return { ...prev, amountPaid: autoFilledPaid.current };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [purchaseForm.quantity, purchaseForm.unitCost]);
 
   const loadSuppliers = async () => {
     setLoading(true);
@@ -161,11 +185,25 @@ export default function Suppliers() {
         items: [{ productID: productId, quantity: qty, unitCost: cost, ...(sp !== undefined ? { sellingPrice: sp } : {}) }],
         amountPaid: parseFloat(amountPaid) || 0,
       });
-      alert(
-        data.selfPurchase
-          ? `Purchase ${data.purchaseID} recorded (self-purchased, no supplier balance).`
-          : `Purchase ${data.purchaseID} recorded. Balance due to supplier: ${formatMoney(data.balanceDue)}`
-      );
+      if (data.selfPurchase) {
+        alert(`Purchase ${data.purchaseID} recorded (self-purchased, no supplier balance).`);
+      } else {
+        // Stage 21 credit fix: surface both sides plainly — what's still
+        // owed on this purchase, and (if this payment covered more than
+        // was owed, after any existing credit was already applied) the
+        // supplier's new running credit that'll offset their next
+        // purchase automatically.
+        const lines = [`Purchase ${data.purchaseID} recorded.`];
+        if (data.creditApplied > 0) {
+          lines.push(`${formatMoney(data.creditApplied)} of existing credit was applied to this purchase.`);
+        }
+        lines.push(`Balance due to supplier: ${formatMoney(data.balanceDue)}`);
+        if (data.creditBalance > 0) {
+          lines.push(`Overpayment recorded — supplier now has ${formatMoney(data.creditBalance)} credit, which will reduce their next purchase automatically.`);
+        }
+        alert(lines.join(' '));
+      }
+      autoFilledPaid.current = '';
       setPurchaseForm(emptyPurchaseForm);
       await reloadEverything();
     } catch (err) {
@@ -200,14 +238,15 @@ export default function Suppliers() {
                       <th className="py-3 px-2 text-left">Phone</th>
                       <SortableHeader label="Purchases" field="purchaseCount" sortBy={sortBy} sortDir={sortDir} onSort={handleSort} />
                       <SortableHeader label="We Owe" field="totalBalanceDue" sortBy={sortBy} sortDir={sortDir} onSort={handleSort} />
+                      <th className="py-3 px-2 text-left">Credit</th>
                       <th className="py-3 px-2 text-left">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
                     {loading ? (
-                      <tr><td colSpan={6} className="py-6 text-center text-gray-400">Loading…</td></tr>
+                      <tr><td colSpan={7} className="py-6 text-center text-gray-400">Loading…</td></tr>
                     ) : suppliers.length === 0 ? (
-                      <tr><td colSpan={6} className="py-6 text-center text-gray-400">No suppliers found</td></tr>
+                      <tr><td colSpan={7} className="py-6 text-center text-gray-400">No suppliers found</td></tr>
                     ) : (
                       suppliers.map((s) => (
                         <Fragment key={s.supplierName}>
@@ -221,6 +260,9 @@ export default function Suppliers() {
                             <td className="py-2 px-3">{s.purchases.length}</td>
                             <td className={`py-2 px-3 ${s.totalBalanceDue > 0 ? 'text-red-700 font-semibold' : ''}`}>
                               {formatMoney(s.totalBalanceDue)}
+                            </td>
+                            <td className={`py-2 px-3 ${s.creditBalance > 0 ? 'text-green-700 font-semibold' : ''}`}>
+                              {s.creditBalance > 0 ? formatMoney(s.creditBalance) : '—'}
                             </td>
                             <td className="py-2 px-3">
                               {isAdmin ? (
@@ -238,18 +280,19 @@ export default function Suppliers() {
                           </tr>
                           {expandedName === s.supplierName && (
                             <tr className="bg-gray-50">
-                              <td colSpan={6} className="p-4">
+                              <td colSpan={7} className="p-4">
                                 <h4 className="font-medium text-sm mb-2">Purchase history</h4>
                                 {s.purchases.length === 0 ? (
                                   <p className="text-xs text-gray-400">No purchases recorded yet.</p>
                                 ) : (
-                                  <table className="w-full min-w-[520px] text-xs bg-white border-collapse">
+                                  <table className="w-full min-w-[600px] text-xs bg-white border-collapse">
                                     <thead className="bg-gray-100">
                                       <tr>
                                         <th className="p-1 text-left border">Purchase ID</th>
                                         <th className="p-1 text-left border">Date</th>
                                         <th className="p-1 text-left border">Items</th>
                                         <th className="p-1 text-left border">Total</th>
+                                        <th className="p-1 text-left border">Credit Applied</th>
                                         <th className="p-1 text-left border">Paid</th>
                                         <th className="p-1 text-left border">Balance</th>
                                       </tr>
@@ -261,6 +304,7 @@ export default function Suppliers() {
                                           <td className="p-1 border">{new Date(p.date).toLocaleDateString()}</td>
                                           <td className="p-1 border">{p.items.map((it) => `${it.productID} x${it.quantity}`).join(', ')}</td>
                                           <td className="p-1 border">{formatMoney(p.totalAmount)}</td>
+                                          <td className="p-1 border">{p.creditApplied > 0 ? formatMoney(p.creditApplied) : '—'}</td>
                                           <td className="p-1 border">{formatMoney(p.amountPaid)}</td>
                                           <td className={`p-1 border ${p.balanceDue > 0 ? 'text-red-700 font-semibold' : ''}`}>{formatMoney(p.balanceDue)}</td>
                                         </tr>
@@ -404,13 +448,14 @@ export default function Suppliers() {
               {purchaseForm.supplierName !== NO_SUPPLIER && (
                 <div>
                   <label className="block mb-1 font-medium">Amount Paid</label>
+                  <p className="text-xs text-gray-500 mb-1">Auto-fills as quantity × cost — edit for a partial payment or overpayment.</p>
                   <input
                     type="number"
                     step="0.01"
                     min="0"
                     value={purchaseForm.amountPaid}
                     onChange={(e) => setPurchaseForm({ ...purchaseForm, amountPaid: e.target.value })}
-                    placeholder="0 = full credit"
+                    placeholder="0 = nothing paid yet"
                     className="border rounded px-3 py-2 w-full"
                   />
                 </div>
@@ -421,6 +466,7 @@ export default function Suppliers() {
                 </button>
                 <p className="text-xs text-gray-500 mt-1">
                   Increases the product's stock immediately and logs what we still owe the supplier if not paid in full.
+                  Paying more than owed is recorded as supplier credit and applied automatically to their next purchase.
                   Selling price is optional — leave it blank to keep the product's current customer-facing price.
                 </p>
               </div>

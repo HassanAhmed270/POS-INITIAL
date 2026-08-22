@@ -919,6 +919,13 @@ app.get('/api/suppliers', requireAuth, asyncHandler(async (req, res) => {
     purchases: s.purchases,
     purchaseCount: s.purchases.length,
     totalBalanceDue: roundMoney(s.purchases.reduce((sum, p) => sum + (p.balanceDue || 0), 0)),
+    // Stage 21 credit fix: what this supplier currently owes *us* from a
+    // past overpayment, automatically applied to reduce what's owed on
+    // their next purchase — see POST /supplier/purchase. Independent of
+    // totalBalanceDue above (that's what we owe them; this is the
+    // reverse), so a supplier can show both a balance due *and* a credit
+    // at the same time if purchases happened in that order.
+    creditBalance: roundMoney(s.creditBalance || 0),
   }));
 
   const { data: withBalance, total } = sortAndPaginate(mapped, { sortBy, sortDir, page, limit });
@@ -1017,6 +1024,15 @@ async function generateUniquePurchaseId() {
 // reader, no separate "restock price" concept. buyingPriceHistory is
 // updated the same as before regardless; the two histories never touch
 // each other.
+// Stage 21 credit fix: overpaying a purchase used to just get silently
+// capped at the total (`Math.min(paid, totalAmount)`), so the extra
+// money vanished from every record instead of being tracked anywhere.
+// Now: amountPaid is no longer capped, and if it exceeds what's owed
+// (after any existing credit is applied — see below), the excess becomes
+// supplier credit (Supplier.creditBalance) that automatically reduces
+// what's owed on the *next* purchase from the same supplier. A single
+// purchase's own balanceDue still never goes negative — the credit lives
+// on the supplier document, not as a negative number on one purchase.
 app.post('/supplier/purchase', requireAuth, asyncHandler(async (req, res) => {
   const { supplierName, items, amountPaid } = req.body;
   const isSelfPurchase = supplierName === NO_SUPPLIER;
@@ -1045,6 +1061,16 @@ app.post('/supplier/purchase', requireAuth, asyncHandler(async (req, res) => {
       return res.status(400).json({ success: false, message: `Invalid selling price for ${item.productID}.` });
     }
   }
+  // Stage 21 credit fix: amountPaid used to be silently coerced to 0 on
+  // anything non-numeric (`Number(amountPaid) || 0`) — garbage input just
+  // vanished instead of erroring. Now validated the same way item fields
+  // are: blank/omitted means "0 paid" (still valid), anything present
+  // must be a real non-negative number.
+  const hasAmountPaid = amountPaid !== undefined && amountPaid !== null && amountPaid !== '';
+  if (hasAmountPaid && (!Number.isFinite(Number(amountPaid)) || Number(amountPaid) < 0)) {
+    return res.status(400).json({ success: false, message: 'Invalid amount paid.' });
+  }
+  const paidInput = roundMoney(hasAmountPaid ? Number(amountPaid) : 0);
 
   let supplier = null;
   if (!isSelfPurchase) {
@@ -1067,11 +1093,15 @@ app.post('/supplier/purchase', requireAuth, asyncHandler(async (req, res) => {
     };
   });
   const totalAmount = roundMoney(cleanItems.reduce((sum, it) => sum + it.unitCost * it.quantity, 0));
-  // Amount-owed tracking only makes sense against a real supplier — a
-  // self-purchase has no one to owe money to.
-  const paid = isSelfPurchase ? totalAmount : roundMoney(Math.min(Math.max(Number(amountPaid) || 0, 0), totalAmount));
-  const balanceDue = isSelfPurchase ? 0 : roundMoney(Math.max(0, totalAmount - paid));
   const purchaseID = await generateUniquePurchaseId();
+  // Self-purchase has no supplier to owe money to or receive credit
+  // from — these stay at their old fixed values for that path. The real
+  // (credit-aware) math happens inside the transaction below, once the
+  // supplier's current creditBalance can be read consistently.
+  let paid = isSelfPurchase ? totalAmount : null;
+  let balanceDue = isSelfPurchase ? 0 : null;
+  let creditApplied = 0;
+  let newCreditBalance = 0;
 
   const session = await mongoose.startSession();
   try {
@@ -1102,6 +1132,24 @@ app.post('/supplier/purchase', requireAuth, asyncHandler(async (req, res) => {
       }
 
       if (!isSelfPurchase) {
+        // Stage 21 credit fix: re-read the supplier's creditBalance
+        // inside the transaction (session-scoped), not from the `supplier`
+        // fetched before the transaction started — another purchase could
+        // have changed it in between. Any existing credit is applied to
+        // *this* purchase's total first; only what's left after that is
+        // "owed", and only overpaying *that* remainder creates new credit.
+        const supplierDoc = await Supplier.findOne({ _id: supplier._id }).session(session);
+        if (!supplierDoc) {
+          throw new AppError(400, `Supplier "${supplierName}" no longer exists.`);
+        }
+        const existingCredit = roundMoney(supplierDoc.creditBalance || 0);
+        creditApplied = roundMoney(Math.min(existingCredit, totalAmount));
+        const netOwed = roundMoney(totalAmount - creditApplied);
+        const overpay = roundMoney(Math.max(0, paidInput - netOwed));
+        paid = paidInput; // what was actually paid this transaction, recorded as-is (no longer capped)
+        balanceDue = roundMoney(Math.max(0, netOwed - paidInput));
+        newCreditBalance = roundMoney(existingCredit - creditApplied + overpay);
+
         // Note: Supplier.purchases' item sub-schema (models/Supplier.js)
         // doesn't declare a `sellingPrice` field, so Mongoose silently
         // strips it here even though cleanItems carries it — intentional,
@@ -1113,7 +1161,10 @@ app.post('/supplier/purchase', requireAuth, asyncHandler(async (req, res) => {
         // schema stripping applies).
         await Supplier.updateOne(
           { _id: supplier._id },
-          { $push: { purchases: { purchaseID, totalAmount, amountPaid: paid, balanceDue, items: cleanItems } } },
+          {
+            $set: { creditBalance: newCreditBalance },
+            $push: { purchases: { purchaseID, totalAmount, amountPaid: paid, balanceDue, creditApplied, items: cleanItems } },
+          },
           { session }
         );
       }
@@ -1127,7 +1178,16 @@ app.post('/supplier/purchase', requireAuth, asyncHandler(async (req, res) => {
           before: null,
           after: isSelfPurchase
             ? { purchaseID, supplierName: NO_SUPPLIER, items: cleanItems, totalAmount }
-            : { purchaseID, supplierName: supplier.supplierName, items: cleanItems, totalAmount, amountPaid: paid, balanceDue },
+            : {
+                purchaseID,
+                supplierName: supplier.supplierName,
+                items: cleanItems,
+                totalAmount,
+                amountPaid: paid,
+                balanceDue,
+                creditApplied,
+                newCreditBalance,
+              },
         },
         session
       );
@@ -1139,7 +1199,16 @@ app.post('/supplier/purchase', requireAuth, asyncHandler(async (req, res) => {
   res.status(201).json(
     isSelfPurchase
       ? { success: true, message: 'Self-purchased stock recorded.', purchaseID, totalAmount, selfPurchase: true }
-      : { success: true, message: 'Purchase recorded and stock updated.', purchaseID, totalAmount, amountPaid: paid, balanceDue }
+      : {
+          success: true,
+          message: 'Purchase recorded and stock updated.',
+          purchaseID,
+          totalAmount,
+          amountPaid: paid,
+          balanceDue,
+          creditApplied,
+          creditBalance: newCreditBalance,
+        }
   );
 }));
 // ── Orders: list/detail (Stage 7) ───────────────────────────
