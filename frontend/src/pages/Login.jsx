@@ -15,8 +15,8 @@ export default function Login() {
     setError('');
     setSubmitting(true);
     try {
-      await login(username.trim(), password);
-      navigate('/dashboard');
+      const user = await login(username.trim(), password);
+      navigate(user.role === 'admin' ? '/dashboard' : '/billing');
     } catch (err) {
       setError(err.message || 'Login failed. Please try again.');
     } finally {

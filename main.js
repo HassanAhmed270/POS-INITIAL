@@ -137,7 +137,7 @@ if (process.env.ENABLE_OFFLINE_SYNC === 'true') {
 // Stage 9's aggregation now lives in lib/reports.js (getDashboardSummary)
 // so Stage 10's export module can reuse the exact same queries — this
 // route is just a thin JSON wrapper around it.
-app.get('/dashboard/load', requireAuth, asyncHandler(async (req, res) => {
+app.get('/dashboard/load', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
   const { range = 'month' } = req.query;
   const result = await getDashboardSummary(range);
   res.json({ success: true, dashboard: result });

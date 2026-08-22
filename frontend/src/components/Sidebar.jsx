@@ -3,22 +3,21 @@ import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../lib/AuthContext';
 
 const links = [
-  { to: '/dashboard', label: 'Home' },
   { to: '/billing', label: 'Billing' },
   { to: '/products', label: 'Products' },
   { to: '/customers', label: 'Customers' },
   { to: '/suppliers', label: 'Suppliers' },
   { to: '/orders', label: 'Orders' },
   { to: '/reports', label: 'Reports' },
+
+];
+
+const adminOnlyLinks = [
+  { to: '/dashboard', label: 'Home' },
+  { to: '/audit-log', label: 'Audit Log' },
   { to: '/workers', label: 'Workers', disabled: true },
   { to: '/webpage', label: 'Webpage', disabled: true },
 ];
-
-// Stage 14: Audit Log is admin-only, so it's appended separately rather
-// than living in the shared `links` array — cashiers never see this
-// entry at all (not even disabled/greyed-out), matching AdminRoute's
-// "bounce, don't just hide" behavior on the page itself.
-const adminOnlyLinks = [{ to: '/audit-log', label: 'Audit Log' }];
 
 // Stage 16 — responsive nav. Below `md` the sidebar becomes an off-canvas
 // drawer (fixed, translated out of view, toggled by a hamburger button
