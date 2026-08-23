@@ -57,47 +57,44 @@ export default function Suppliers() {
   // these visibly distinct in the UI is the point of Stage 21 item 15.
   const previousSellingPrice = selectedPurchaseProduct?.price ?? null;
 
-  // Credit-fix follow-up #2: the auto-fill (and the "how much do you
-  // actually owe" figure it's based on) needs to account for whatever
-  // credit this supplier already has — otherwise accepting the default
-  // "pay in full" amount on a purchase that's already fully or partly
-  // covered by existing credit silently creates *more* credit on top of
-  // what's already there (reported: credit ballooning to $850 across a
-  // few ordinary restocks, not from anyone deliberately overpaying).
-  // allSuppliers already carries creditBalance from the same
-  // GET /api/suppliers response used to populate this dropdown.
-  const selectedSupplierCredit =
-    purchaseForm.supplierName && purchaseForm.supplierName !== NO_SUPPLIER
-      ? allSuppliers.find((s) => s.supplierName === purchaseForm.supplierName)?.creditBalance ?? 0
-      : 0;
-
-  // Amount Paid now auto-fills with what's actually still owed after
-  // existing credit is applied — quantity × cost, minus this supplier's
-  // creditBalance, floored at 0 — not the raw total. Stays fully
-  // editable for a deliberate partial payment or an intentional
-  // overpayment; `autoFilledPaid` tracks the value *we* last wrote in,
-  // so the effect below only overwrites the field when it still matches
-  // what we auto-filled (i.e. the admin hasn't typed their own number
-  // since) — editing amountPaid by hand always wins. This mirrors
-  // exactly the netOwed/creditApplied math POST /supplier/purchase does
-  // server-side, so the field an admin sees is what they'll actually be
-  // asked to pay, not last time's total.
+  // Amount Paid auto-fills as a plain quantity × cost — the raw cost of
+  // what's being restocked, full stop. Deliberately NOT reduced by
+  // whatever credit the supplier has: an earlier version of this tried
+  // to be "smart" and subtract available credit from the suggested
+  // amount, which made the field's value depend on hidden state the
+  // admin couldn't see at a glance and became its own source of
+  // confusion. This is simpler and predictable — if a supplier has
+  // credit, that's shown separately below (and still applied
+  // automatically server-side to reduce balanceDue / build more credit
+  // per POST /supplier/purchase); the admin decides whether to type a
+  // smaller number, not the form. Stays fully editable — `autoFilledPaid`
+  // tracks the value *we* last wrote in, so the effect below only
+  // overwrites the field when it still matches what we auto-filled (i.e.
+  // the admin hasn't typed their own number since) — editing amountPaid
+  // by hand always wins.
   const autoFilledPaid = useRef('');
   useEffect(() => {
     const qty = parseInt(purchaseForm.quantity);
     const cost = parseFloat(purchaseForm.unitCost);
     const computedTotal = Number.isInteger(qty) && qty > 0 && Number.isFinite(cost) && cost >= 0 ? roundMoney(qty * cost) : '';
-    const computedNetOwed = computedTotal === '' ? '' : roundMoney(Math.max(0, computedTotal - selectedSupplierCredit));
     setPurchaseForm((prev) => {
       if (prev.amountPaid !== '' && prev.amountPaid !== autoFilledPaid.current) {
         // Admin typed their own value — leave it alone.
         return prev;
       }
-      autoFilledPaid.current = computedNetOwed === '' ? '' : String(computedNetOwed);
+      autoFilledPaid.current = computedTotal === '' ? '' : String(computedTotal);
       return { ...prev, amountPaid: autoFilledPaid.current };
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [purchaseForm.quantity, purchaseForm.unitCost, purchaseForm.supplierName, selectedSupplierCredit]);
+  }, [purchaseForm.quantity, purchaseForm.unitCost]);
+
+  // Shown next to the Amount Paid field purely informationally — the
+  // admin can see this supplier already has credit and choose to pay
+  // less themselves, but the auto-fill above never uses it.
+  const selectedSupplierCredit =
+    purchaseForm.supplierName && purchaseForm.supplierName !== NO_SUPPLIER
+      ? allSuppliers.find((s) => s.supplierName === purchaseForm.supplierName)?.creditBalance ?? 0
+      : 0;
 
   const loadSuppliers = async () => {
     setLoading(true);
@@ -257,8 +254,8 @@ export default function Suppliers() {
                       <SortableHeader label="Supplier" field="supplierName" sortBy={sortBy} sortDir={sortDir} onSort={handleSort} />
                       <th className="py-3 px-2 text-left">Contact</th>
                       <th className="py-3 px-2 text-left">Phone</th>
-                      <SortableHeader label="Purchases" field="purchaseCount" sortBy={sortBy} sortDir={sortDir} onSort={handleSort} />
-                      <SortableHeader label="Balance" field="totalBalanceDue" sortBy={sortBy} sortDir={sortDir} onSort={handleSort} />
+                      <SortableHeader label="Purchases" field="purchaseCount" sortBy={sortBy} sortDir={sortDir} onSort={handleSort} align="right" />
+                      <SortableHeader label="Balance" field="totalBalanceDue" sortBy={sortBy} sortDir={sortDir} onSort={handleSort} align="right" />
                       <th className="py-3 px-2 text-left">Actions</th>
                     </tr>
                   </thead>
@@ -277,46 +274,22 @@ export default function Suppliers() {
                             <td className="py-2 px-3">{s.supplierName}</td>
                             <td className="py-2 px-3">{s.contactPerson}</td>
                             <td className="py-2 px-3">{s.phone}</td>
-                            <td className="py-2 px-3">{s.purchases.length}</td>
-                            {/* Single combined field showing the NET position — what's
-                                due on unpaid purchases minus available credit — rather
-                                than just picking one to show and hiding the other. A
-                                supplier can genuinely have both at once (some purchases
-                                still owe money, a different purchase generated credit
-                                that hasn't been consumed by a new restock yet); showing
-                                only totalBalanceDue in that case looked like the credit
-                                had vanished, when it's just not netted against *older*
-                                purchases (only applied going forward, to the next
-                                restock — see POST /supplier/purchase). The breakdown
-                                line makes that math visible instead of a bare number. */}
-                            {(() => {
-                              const netBalance = roundMoney((s.totalBalanceDue || 0) - (s.creditBalance || 0));
-                              return (
-                                <td className="py-2 px-3">
-                                  {netBalance > 0 ? (
-                                    <>
-                                      <span className="text-red-700 font-semibold">{formatMoney(netBalance)} owed</span>
-                                      {s.creditBalance > 0 && (
-                                        <div className="text-[10px] text-gray-500">
-                                          {formatMoney(s.totalBalanceDue)} due − {formatMoney(s.creditBalance)} credit
-                                        </div>
-                                      )}
-                                    </>
-                                  ) : netBalance < 0 ? (
-                                    <>
-                                      <span className="text-green-700 font-semibold">{formatMoney(-netBalance)} credit</span>
-                                      {s.totalBalanceDue > 0 && (
-                                        <div className="text-[10px] text-gray-500">
-                                          {formatMoney(s.creditBalance)} credit − {formatMoney(s.totalBalanceDue)} due
-                                        </div>
-                                      )}
-                                    </>
-                                  ) : (
-                                    <span className="text-gray-400">{formatMoney(0)}</span>
-                                  )}
-                                </td>
-                              );
-                            })()}
+                            <td className="py-2 px-3 text-right">{s.purchases.length}</td>
+                            {/* One signed number for the whole account, netted across
+                                every purchase (totalBalanceDue minus creditBalance) —
+                                not two separate fields to reconcile in your head, and
+                                not picking one to show while hiding the other. Negative
+                                (red) = we owe them; positive (green) = they owe us;
+                                exactly zero = settled. The per-purchase breakdown lives
+                                in the expanded row below, not duplicated up here. */}
+                            <td className="py-2 px-3 text-right font-semibold">
+                              {(() => {
+                                const netBalance = roundMoney((s.totalBalanceDue || 0) - (s.creditBalance || 0));
+                                if (netBalance > 0) return <span className="text-red-700">-{formatMoney(netBalance)}</span>;
+                                if (netBalance < 0) return <span className="text-green-700">+{formatMoney(-netBalance)}</span>;
+                                return <span className="text-gray-400 font-normal">{formatMoney(0)}</span>;
+                              })()}
+                            </td>
                             <td className="py-2 px-3">
                               {isAdmin ? (
                                 <button
@@ -344,52 +317,50 @@ export default function Suppliers() {
                                         <th className="p-1 text-left border">Purchase ID</th>
                                         <th className="p-1 text-left border">Date</th>
                                         <th className="p-1 text-left border">Items</th>
-                                        <th className="p-1 text-left border">Total</th>
-                                        <th className="p-1 text-left border">Paid</th>
-                                        <th className="p-1 text-left border">Balance</th>
+                                        <th className="p-1 text-right border">Total</th>
+                                        <th className="p-1 text-right border">Paid</th>
+                                        <th className="p-1 text-right border">Balance</th>
                                       </tr>
                                     </thead>
                                     <tbody>
-                                      {s.purchases.map((p) => (
-                                        <tr key={p.purchaseID}>
-                                          <td className="p-1 border">{p.purchaseID}</td>
-                                          <td className="p-1 border">{new Date(p.date).toLocaleDateString()}</td>
-                                          <td className="p-1 border">{p.items.map((it) => `${it.productID} x${it.quantity}`).join(', ')}</td>
-                                          <td className="p-1 border">{formatMoney(p.totalAmount)}</td>
-                                          {/* Paid can legitimately exceed Total — either this
-                                              purchase's own overpayment created new credit
-                                              (below), or the total was already covered by
-                                              credit from an *earlier* purchase (see the
-                                              Balance cell), so none of this cash was actually
-                                              needed for the purchase itself. Without this
-                                              note a row like Total $200 / Paid $250 with
-                                              "$200 credit applied" on Balance reads as
-                                              contradictory — as if $450 went toward a $200
-                                              purchase. It didn't: this note makes clear how
-                                              much of Paid became new credit rather than
-                                              covering anything here. */}
-                                          <td className="p-1 border">
-                                            {formatMoney(p.amountPaid)}
-                                            {p.creditGenerated > 0 && (
-                                              <div className="text-green-600 font-normal text-[10px] leading-tight">
-                                                +{formatMoney(p.creditGenerated)} new credit
-                                              </div>
-                                            )}
-                                          </td>
-                                          {/* Credit applied folded into this cell instead of
-                                              its own column — a column that reads "—" on
-                                              nearly every row wastes space; a small note only
-                                              appears here when credit was actually used. */}
-                                          <td className={`p-1 border ${p.balanceDue > 0 ? 'text-red-700 font-semibold' : ''}`}>
-                                            {formatMoney(p.balanceDue)}
-                                            {p.creditApplied > 0 && (
-                                              <div className="text-green-600 font-normal text-[10px] leading-tight">
-                                                {formatMoney(p.creditApplied)} credit used
-                                              </div>
-                                            )}
-                                          </td>
-                                        </tr>
-                                      ))}
+                                      {s.purchases.map((p) => {
+                                        // Balance is the single source of truth for how this
+                                        // purchase settled, color-coded three ways: still owe
+                                        // something (red), this purchase's own payment created
+                                        // new credit beyond what it owed (green), or it settled
+                                        // exactly with nothing left over and nothing generated
+                                        // (plain). creditApplied — existing credit consumed —
+                                        // gets a small note underneath either way, since it's
+                                        // useful context but doesn't change which of the three
+                                        // states this row is in.
+                                        const stillOwes = p.balanceDue > 0;
+                                        const madeCredit = !stillOwes && p.creditGenerated > 0;
+                                        return (
+                                          <tr key={p.purchaseID}>
+                                            <td className="p-1 border">{p.purchaseID}</td>
+                                            <td className="p-1 border">{new Date(p.date).toLocaleDateString()}</td>
+                                            <td className="p-1 border">{p.items.map((it) => `${it.productID} x${it.quantity}`).join(', ')}</td>
+                                            <td className="p-1 border text-right">{formatMoney(p.totalAmount)}</td>
+                                            <td className="p-1 border text-right">{formatMoney(p.amountPaid)}</td>
+                                            <td
+                                              className={`p-1 border text-right ${
+                                                stillOwes ? 'text-red-700 font-semibold' : madeCredit ? 'text-green-700 font-semibold' : ''
+                                              }`}
+                                            >
+                                              {stillOwes
+                                                ? formatMoney(p.balanceDue)
+                                                : madeCredit
+                                                ? `+${formatMoney(p.creditGenerated)}`
+                                                : formatMoney(0)}
+                                              {p.creditApplied > 0 && (
+                                                <div className="text-gray-500 font-normal text-[10px] leading-tight">
+                                                  {formatMoney(p.creditApplied)} credit used
+                                                </div>
+                                              )}
+                                            </td>
+                                          </tr>
+                                        );
+                                      })}
                                     </tbody>
                                   </table>
                                 )}
@@ -530,9 +501,8 @@ export default function Suppliers() {
                 <div>
                   <label className="block mb-1 font-medium">Amount Paid</label>
                   <p className="text-xs text-gray-500 mb-1">
-                    {selectedSupplierCredit > 0
-                      ? `Auto-fills with what's still owed after this supplier's ${formatMoney(selectedSupplierCredit)} credit is applied — edit for a partial payment or overpayment.`
-                      : 'Auto-fills as quantity × cost — edit for a partial payment or overpayment.'}
+                    Auto-fills as quantity × cost — edit for a partial payment or overpayment.
+                    {selectedSupplierCredit > 0 && ` This supplier has ${formatMoney(selectedSupplierCredit)} credit — pay less if you want to use it.`}
                   </p>
                   <input
                     type="number"

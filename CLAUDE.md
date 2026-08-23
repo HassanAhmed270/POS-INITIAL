@@ -268,16 +268,23 @@ works; `main.js` logs a warning at boot and there's just no UI to serve.
   purchase. `POST /supplier/purchase` applies any existing credit to a
   new purchase's total *before* computing what's owed
   (`creditApplied = min(existingCredit, totalAmount)`), and only paying
-  more than what's left after that (`netOwed`) creates *further* credit —
-  read/written on the supplier document inside the same session/
-  transaction as the stock update, never as a negative `balanceDue` on
-  an individual purchase (that field stays `min: 0`, floored). Each
-  purchase snapshots how much credit it consumed in its own
-  `creditApplied` field, for audit purposes only — never re-read or
+  more than what's left after that (`netOwed`) creates *further* credit,
+  recorded on that purchase's own `creditGenerated` field — read/written
+  on the supplier document inside the same session/transaction as the
+  stock update, never as a negative `balanceDue` on an individual
+  purchase (that field stays `min: 0`, floored). `creditApplied` and
+  `creditGenerated` are both audit snapshots only — never re-read or
   re-applied later. `amountPaid` is no longer capped at the purchase
   total; it's validated (finite, ≥0) the same way item fields are, and
   recorded as exactly what was submitted. Self-purchases have no
-  Supplier document and therefore no credit concept at all.
+  Supplier document and therefore no credit concept at all. **Note**:
+  the frontend's Amount Paid field intentionally does *not* subtract
+  available credit from its auto-filled suggestion (tried once, reverted
+  — see progress.md) — it always suggests plain `quantity × unitCost`,
+  so paying that suggested amount when the supplier already has credit
+  will legitimately generate *more* credit. That's expected, not a bug;
+  the admin sees the supplier's credit balance and can choose to type a
+  smaller number themselves.
 - **Money rounding**: use `roundMoney()` (`lib/money.js`) on every
   computed amount before storing or comparing — floating-point drift
   across many small discounts/payments is the usual source of "off by a

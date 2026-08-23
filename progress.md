@@ -875,6 +875,66 @@ field actually round-tripping through a real restock and appearing
 correctly in the UI is code-reviewed and boot-tested (validation gates
 only) rather than confirmed end-to-end.
 
+## Post-Stage-21 Consolidation — Simplified Credit Display & Reverted Auto-Fill
+
+Feedback after the last several credit-related patches: the accumulated
+small fixes had made the Suppliers page inconsistent — money columns
+weren't aligned, credit info was split awkwardly across two different
+columns (Paid's "new credit" note vs. Balance's "credit used" note), the
+top summary mixed text labels with a breakdown line, and the Amount Paid
+auto-fill's credit-aware subtraction (added a few commits back to stop
+credit from silently growing) was flagged as the wrong direction
+entirely — the suggested payment amount should be a simple, predictable
+number based purely on what's being bought, not a value that silently
+shifts based on hidden supplier state.
+
+**Amount Paid auto-fill reverted to plain `quantity × cost`** — no
+longer subtracts the supplier's `creditBalance`. This is a deliberate
+reversal of the immediately preceding "credit-aware auto-fill" commit,
+requested explicitly: the suggested amount should reflect the literal
+cost of what's being restocked, full stop. The supplier's available
+credit is still shown (informationally, in the field's helper text) so
+the admin can *choose* to pay less, but the form no longer guesses on
+their behalf. Backend math (`POST /supplier/purchase`) is completely
+unchanged — credit is still applied automatically to reduce what's
+owed, and still still grows if the admin pays more than what's actually
+owed after that; this only changes what number the field starts with.
+
+**Purchase-history table**: the split "new credit" (on Paid) / "credit
+used" (on Balance) notes are consolidated into a single three-state
+Balance column: red `balanceDue` when something's still owed, green
+`+creditGenerated` when this purchase's own payment created new credit,
+plain `$0.00` when it settled exactly with nothing left over and nothing
+generated. `creditApplied` (existing credit consumed) still gets a
+small gray note underneath either way — informative context, not a
+fourth color state. Paid is now just a plain right-aligned figure with
+no attached note.
+
+**Top summary table**: the "$X owed" / "$Y credit" text plus a
+two-line breakdown is now a single signed number — red `-$X` (net
+amount owed across the whole purchase history) or green `+$X` (net
+credit), `$0.00` when settled — since the per-purchase breakdown is
+already visible one click away in the expanded purchase history, it
+doesn't need to be duplicated at the summary level too.
+
+**Alignment**: `SortableHeader` gained an `align` prop (`'left'`
+default, unchanged everywhere else) so its `<th>` can right-align to
+match right-aligned numeric `<td>`s — used for Purchases/Balance on the
+supplier table. Both tables' money columns (Total/Paid/Balance) are now
+right-aligned throughout, header and body together, instead of the
+previous inconsistent left-alignment on some cells.
+
+**Verified:** `npm run build` + `npm run lint` clean (same one
+pre-existing unrelated `AuthContext.jsx` warning). Confirmed the built
+CSS actually contains the `text-right` utility (Tailwind's JIT scanner
+needs the literal class string present in source, which the `align`
+prop implementation preserves — no dynamically-interpolated class
+names). Hand-verified the new signed top-summary value and three-state
+row logic against the exact numbers from the reported screenshots — all
+match expected output.
+
+**Not verified:** no live database/browser in this sandbox.
+
 ## Route Inventory — End of Stage 15
 
 **Public:** `POST /auth/login`, `POST /billing/orderid`
