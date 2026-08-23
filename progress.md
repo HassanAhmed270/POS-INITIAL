@@ -970,12 +970,150 @@ supports `range=week|month|year`. Exports: `summary`, `sales`, `refunds`,
 5. Dashboard refund count/amount use different date scopes.
 6. Offline sync not stress-tested at scale.
 
+## Stage 22 — Batch-Based Costing & Dashboard Profit (FIFO)
+
+New model `StockBatch` (`models/StockBatch.js`) — one document per
+restock: `productID`, `supplierID` (null for self-purchase, mirrors
+`buyingPriceHistory[].supplierID`), `purchaseID`, `quantityPurchased`,
+`quantityRemaining`, `unitCost` (frozen at creation — a later restock
+never rewrites an older batch's cost, this is what keeps historical
+profit stable per exit criteria #6), `purchaseDate`. Indexed on
+`{productID, purchaseDate}` for FIFO ordering.
+
+New `lib/costing.js` — the FIFO engine, isolated from the rest of the
+app the same way `lib/offlineSync.js` is:
+- `createBatch()` — called from `POST /supplier/purchase`'s existing
+  per-item loop (both the real-supplier and `NoSupplier` self-purchase
+  paths), inside the same transaction as the stock/`buyingPriceHistory`
+  update. One new batch per restock line, full stop — restocking already
+  atomically updates stock, this just also drops a cost lot.
+- `consumeFIFO(productID, quantity, session)` — draws from the oldest
+  available batch(es) first (guarded atomic `$inc` on
+  `quantityRemaining`, never read-then-write), same pattern the stock
+  decrement next to it already uses. Returns exactly what it was able to
+  cost (`consumption[]`, `costAmount`, `costQuantity`) plus
+  `unknownQuantity` for anything beyond available batch stock — **never**
+  falls back to pricing the shortfall at today's cost (exit criteria #7).
+  This can never block a sale; it's a pure overlay next to the existing
+  stock-decrement guard, not a new gate on checkout.
+- `deriveCostSource(costQuantity, quantity)` → `'batch'` (fully costed),
+  `'partial'` (a batch ran dry mid-line), or `'unknown'` (no batch
+  backing at all — legacy pre-Stage-22 sales, or stock added via the
+  Products admin form's plain `stock`/`already` fields, which have no
+  cost input and deliberately do **not** create a batch — see the
+  comment at the top of `StockBatch.js`).
+- `restoreConsumption(batchConsumption, originalQuantity, restoreQty,
+  session)` — the inverse, used by admin edit/refund. Gives back
+  "unknown" (unbatched) units first since there's no batch to credit
+  them to anyway, then works backward through the line's own
+  `batchConsumption` list (most-recently-consumed batch first), so the
+  oldest-batch portion of what's left keeps its cost basis intact
+  through a partial edit/refund.
+
+**`Order.products[]`** (`models/Order.js`) gained `costAmount`,
+`costQuantity`, `costSource`, `batchConsumption[]` — set once at commit
+time from `consumeFIFO()`'s result, then frozen. `costAmount` only ever
+covers the known-cost portion (`costQuantity` of `quantity`) — the rest
+is deliberately left out rather than priced at today's cost, per exit
+criteria #4/#7 (discounted actual-sale-amount vs. batch cost, never the
+list price).
+
+**`POST /billing/orderDetails`** (main.js) — `consumeFIFO()` is called
+once per line inside the existing stock-decrement loop, same
+transaction, right after that line's stock guard succeeds. Nothing about
+the existing price-reverification / reservation / draft-consumption flow
+changed; this only adds the cost side-effect next to the stock one that
+was already there.
+
+**`lib/offlineSync.js`** — same `consumeFIFO()` call added to its own
+stock-availability loop (separate transaction/module by design, per
+CLAUDE.md — kept that way here too), so an offline-synced sale draws
+down cost batches the same as a live one instead of silently staying
+cost-blind and permanently excluded from profit.
+
+**Admin edit/refund** (`applyLineReduction()` in main.js, shared by
+`POST /api/order/:orderID/edit` and `POST /api/order/:orderID/refund`) —
+now calls `restoreConsumption()` before mutating the line (needs the
+line's *original* quantity/consumption first), then proportionally
+reduces `costAmount`/`costQuantity`/`batchConsumption` by exactly what
+was restored — not an estimate, the exact batch units given back. A full
+refund (`newQty === 0`) still removes the line entirely as before; the
+restore call still runs first so the batches get their stock back either
+way. This satisfies exit criteria #11: a refunded/edited-down line can
+never keep contributing its old cost/revenue to profit, because the
+dashboard's profit facet (below) reads the same already-mutated
+`order.products` array every other stat here already reads.
+
+**`lib/reports.js`** — `getDashboardSummary()` gained a `totalProfit`
+facet in the existing `$facet` aggregation (same date-range `$match` as
+every other stat, so it's never out of sync with `overallSales`). Per
+line: `profitContribution = (amount / quantity) * costQuantity -
+costAmount` — i.e. only the known-cost portion of a line's revenue is
+matched against its known cost; the unknown-cost portion contributes
+*nothing* to profit (not revenue, not cost) rather than being priced at
+today's cost. Also returns `totalCostOfGoodsSold` and
+`unknownCostUnits` (sum of `quantity - costQuantity` across the range) —
+the latter is Stage 22's "identify legacy/unbatched sales separately"
+requirement (exit criteria #7), surfaced as a number rather than buried
+silently in a profit total that just looks smaller than it should.
+
+**`routes/export.js`** — the `/api/export/summary` CSV gained `Total
+Profit`, `Total Cost of Goods Sold`, `Units Sold With Unknown Cost`
+columns, matching the same `getDashboardSummary()` call it already made
+(this file's own stated purpose is "the same headline numbers the
+dashboard shows" — keeping it in sync is not scope creep, it's the
+file's job).
+
+**`frontend/src/pages/Dashboard.jsx`** — added a "Total Profit" stat card
+next to "Total Sales" (grid widened from 4 to 5 columns on that row).
+Its hint line shows "From batch/FIFO cost records" normally, or
+"`N unit(s) sold have no recorded cost, excluded`" when
+`unknownCostUnits > 0` for the selected range — so the simplification
+(Stage 22 §8 explicitly wants this simple, not a full accounting module)
+doesn't come at the cost of silently hiding that some sales aren't
+represented in it.
+
+**Deliberately unbatched stock**: `POST /api/product` (new
+product/initial stock via the Products admin form) does **not** create a
+`StockBatch` — that form only ever captured a selling price, never a
+cost, and Stage 22 explicitly says not to invent one. Stock entered this
+way (and any pre-Stage-22 stock/sales) is sold with `costSource:
+'unknown'`, tracked but excluded from profit rather than misrepresented.
+If a real acquisition cost needs to be attached to that stock later, the
+supported path is a `POST /supplier/purchase` self-purchase
+(`NoSupplier`) restock, which does create a batch.
+
+**Verified:** `node --check` clean on every touched backend file
+(`main.js`, `models/Order.js`, `models/StockBatch.js`, `lib/costing.js`,
+`lib/reports.js`, `lib/offlineSync.js`, `routes/export.js`). `npm run
+build` + `npm run lint` clean on the frontend (same one pre-existing
+unrelated `AuthContext.jsx` warning). Live boot test: server starts
+clean with the built frontend, `GET /` returns the SPA shell (200),
+unmatched `/api/*` still 404s as JSON, `GET /dashboard/load` without a
+token still 401s, server stays up and responsive after a login attempt
+against the absent DB (no crash). Hand-traced the FIFO/profit math
+against every worked example in the Stage 22 spec itself: the 10@100 +
+10@120, sell-12 example → 1240 total cost (not 1200 or 1440); the
+150/100/130-discount example → 30 profit (not 50); a partial-refund
+scenario (3 units on one batch, refund 2) → remaining line correctly
+keeps `costAmount: 100, costQuantity: 1, costSource: 'batch'` — all
+match the spec's own numbers exactly.
+
+**Not verified:** no live database/replica set in this sandbox (same
+limitation as every DB-touching stage before this one) — the actual
+`StockBatch` creation/consumption/restoration round-tripping through a
+real MongoDB transaction, and the dashboard aggregation running against
+real data, are code-reviewed and hand-traced against the spec's worked
+examples rather than confirmed end-to-end. No browser available either,
+so the new Dashboard stat card is code-reviewed against the existing
+`StatCard` pattern rather than visually confirmed.
+
 ## Current Status
 
-Stages 1–17 and 19–21 implemented (Stage 18, desktop distribution,
-remains deliberately skipped/deferred — see the note at the top of its
-Stage 19 entry above). Stage 11 **end-to-end verified in a real browser +
-database**. Stages 1–10/12–17/19–21 verified by
+Stages 1–22 implemented (Stage 18, desktop distribution, remains
+deliberately skipped/deferred — see the note at the top of its Stage 19
+entry above). Stage 11 **end-to-end verified in a real browser +
+database**. Stages 1–10/12–17/19–22 verified by
 build/lint/`node --check`/boot-test/unit-test per stage above — DB paths
 past the auth gate are code-reviewed only (no replica set in this
 sandbox), Stage 16's responsive layout and Stage 17's print/preview
@@ -986,8 +1124,14 @@ verified. Remaining items are deliberate scope limitations and
 security/stress-testing/manual-check follow-ups unless a new spec adds
 scope.
 
-Stage 22 (Batch-Based Costing & Dashboard Profit / FIFO) is next in
-`optimization.md`, explicitly depends on this stage.
+Stage 22 also introduces a **new collection** (`StockBatch`) with no
+backfill for pre-Stage-22 restocks — every unit sold before this stage
+(and any stock added via the Products form rather than a supplier
+restock) has no batch behind it and is deliberately excluded from
+`totalProfit` (`costSource: 'unknown'`) rather than assigned an
+arbitrary current cost. See the Stage 22 entry above before expecting
+`totalProfit` to reflect a shop's full sales history immediately after
+merging this.
 
 Stage 20 also carries a **breaking schema change** (`Product.supplier`
 string → `Product.supplierID` reference) with no migration path in this

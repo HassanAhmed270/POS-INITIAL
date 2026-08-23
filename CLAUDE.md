@@ -92,6 +92,13 @@ the old token.
     **Fixed-size ring buffer**, not an unbounded log — see
     `lib/auditLog.js`. Written only via `logAudit()`; nothing should
     insert into this collection directly.
+  - `StockBatch.js` (Stage 22) — one document per restock: `productID`,
+    `supplierID` (nullable), `purchaseID`, `quantityPurchased`,
+    `quantityRemaining`, `unitCost` (frozen at creation), `purchaseDate`.
+    Written only via `lib/costing.js`'s `createBatch()`
+    (`POST /supplier/purchase`) and consumed/restored only via that same
+    file's `consumeFIFO()`/`restoreConsumption()` — never mutated
+    directly elsewhere. See "Batch-based costing" below.
 - **`routes/`** — `auth.js` (login/JWT), `export.js` (Stage 10, CSV
   export), `sync.js` (Stage 11, offline sync). Everything else — including
   order edit/refund (`POST /api/order/:orderID/edit`,
@@ -105,7 +112,8 @@ the old token.
   pass the transaction's `session` when calling from inside an existing
   `session.withTransaction()` block — order commit/edit/refund — omit it
   for routes with no transaction of their own, currently product/customer/
-  supplier saves).
+  supplier saves), `costing.js` (Stage 22 — FIFO batch cost consumption/
+  restoration; see "Batch-based costing" below).
 - **`frontend/`** — the entire UI. React (Vite, Tailwind via
   `@tailwindcss/vite`, no CDN), React Router for client-side routing. Talks
   to the backend over JSON only, via `frontend/src/lib/api.js` — every
@@ -289,6 +297,34 @@ works; `main.js` logs a warning at boot and there's just no UI to serve.
   computed amount before storing or comparing — floating-point drift
   across many small discounts/payments is the usual source of "off by a
   cent" bugs here.
+- **Batch-based costing / FIFO (Stage 22)**: every restock
+  (`POST /supplier/purchase`, real-supplier or self-purchased) creates a
+  `StockBatch` alongside its existing `buyingPriceHistory` entry — a
+  distinct, frozen cost lot (`lib/costing.js`'s `createBatch()`). A
+  completed sale (`POST /billing/orderDetails`, and the offline-sync
+  equivalent in `lib/offlineSync.js`) draws down the oldest available
+  batch(es) first (`consumeFIFO()`) in the same transaction as its stock
+  decrement, and records exactly what it consumed on
+  `Order.products[].costAmount`/`costQuantity`/`costSource`/
+  `batchConsumption` — frozen from that point on; a later restock, price
+  change, or product/supplier edit never rewrites an already-completed
+  sale's cost basis, because it never touches an old batch's `unitCost`,
+  only ever creates a new one. Admin edit/refund
+  (`applyLineReduction()`) calls the inverse, `restoreConsumption()`,
+  before mutating a line, so a reduced/removed line gives back exactly
+  the batch units (and cost) it had consumed — this is what keeps the
+  dashboard's `totalProfit` from double-counting a sale that's since been
+  edited down or refunded, since that facet (`lib/reports.js`) just reads
+  the same already-mutated `order.products` every other dashboard stat
+  reads. Stock added via the Products admin form
+  (`POST /api/product`'s `stock`/`already` fields) does **not** create a
+  batch — that form never captured a cost, and Stage 22 explicitly
+  forbids inventing one — so sales drawing on it (or on any pre-Stage-22
+  stock) are recorded `costSource: 'unknown'` and are excluded from
+  `totalProfit` rather than priced at today's cost. `unknownCostUnits` in
+  the dashboard response surfaces how much of a given range's sales that
+  affects, so it's visible rather than silently baked into a
+  smaller-than-expected profit number.
 - **Two independent feature-flagged modules (Stage 10/11)**: CSV export
   (`ENABLE_EXPORTS`, default on) and offline sync (`ENABLE_OFFLINE_SYNC`,
   default off, plus `VITE_ENABLE_OFFLINE_SYNC` on the frontend — both must

@@ -16,7 +16,29 @@ const orderSchema = new Schema({
       amount: { type: Number, required: true, min: 0 },
       discount: { type: Number, required: true, min: 0, max: 100 }, // discountValue (%)
       discountType: { type: String, enum: ['none', 'preset', 'manual'], default: 'manual' },
-      discountAmount: { type: Number, required: true, min: 0, default: 0 } // $ saved on this line
+      discountAmount: { type: Number, required: true, min: 0, default: 0 }, // $ saved on this line
+      // Stage 22 — batch-based costing. Set once at commit time
+      // (POST /billing/orderDetails) from lib/costing.js's consumeFIFO(),
+      // then frozen: later restocks/price changes never rewrite these.
+      // costAmount is the total FIFO cost of only the *known-cost*
+      // portion of this line's quantity (costQuantity units); the
+      // remaining (quantity - costQuantity) units have no batch backing
+      // (legacy stock, or stock added with no cost via the Products
+      // form) and are deliberately left out of costAmount rather than
+      // priced at today's cost — see CLAUDE.md Stage 22.
+      costAmount: { type: Number, min: 0, default: 0 },
+      costQuantity: { type: Number, min: 0, default: 0 },
+      costSource: { type: String, enum: ['batch', 'partial', 'unknown'], default: 'unknown' },
+      // Which batch(es) this line's costQuantity units actually came
+      // from, oldest-first — needed so an admin edit/refund can give the
+      // exact right units back (see applyLineReduction/restoreConsumption).
+      batchConsumption: [
+        {
+          batchId: { type: Schema.Types.ObjectId, ref: 'StockBatch' },
+          quantity: { type: Number, required: true, min: 1 },
+          unitCost: { type: Number, required: true, min: 0 }
+        }
+      ]
     }
   ],
   cashier: { type: String, required: true },

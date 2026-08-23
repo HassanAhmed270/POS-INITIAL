@@ -129,6 +129,9 @@ router.get(
     sendCSV(res, `summary-${range}`, [summary], [
       { key: 'range', label: 'Range' },
       { key: 'overallSales', label: 'Total Sales' },
+      { key: 'totalProfit', label: 'Total Profit' },
+      { key: 'totalCostOfGoodsSold', label: 'Total Cost of Goods Sold' },
+      { key: 'unknownCostUnits', label: 'Units Sold With Unknown Cost' },
       { key: 'totalOrders', label: 'Total Orders' },
       { key: 'refundedOrders', label: 'Refunded Orders' },
       { key: 'refundedAmount', label: 'Refunded Amount' },

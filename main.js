@@ -13,6 +13,7 @@ const PendingBill = require('./models/PendingBill');
 const Supplier = require('./models/Supplier');
 const Refund = require('./models/Refunds');
 const AuditLog = require('./models/AuditLog');
+const StockBatch = require('./models/StockBatch');
 
 const logger = require('./lib/logger');
 const authRoutes = require('./routes/auth');
@@ -21,6 +22,7 @@ const { asyncHandler, errorHandler } = require('./middleware/errorHandler');
 const { AppError } = require('./lib/errors');
 const { roundMoney } = require('./lib/money');
 const { getLatestSellingPrice, getLatestBuyingPrice } = require('./lib/pricing');
+const { createBatch, consumeFIFO, deriveCostSource, restoreConsumption } = require('./lib/costing');
 const { escapeRegex, parsePagination, sortAndPaginate } = require('./lib/query');
 const { getDashboardSummary } = require('./lib/reports');
 const { logAudit } = require('./lib/auditLog');
@@ -759,6 +761,18 @@ app.post('/billing/orderDetails', requireAuth, asyncHandler(async (req, res) => 
         if (!updated) {
           throw new AppError(409, `Stock for ${p.productID} could not be confirmed. Please refresh and try again.`);
         }
+
+        // Stage 22: record which cost batch(es) this line's units
+        // actually came from (FIFO — oldest batch first), so the
+        // dashboard's profit figure and this line's own historical cost
+        // are both fixed at commit time. This never blocks the sale —
+        // any quantity beyond what a batch can cover is recorded as
+        // unknown-cost, not priced at today's cost (see lib/costing.js).
+        const fifo = await consumeFIFO(p.productID, p.quantity, session);
+        p.costAmount = fifo.costAmount;
+        p.costQuantity = fifo.costQuantity;
+        p.costSource = deriveCostSource(fifo.costQuantity, p.quantity);
+        p.batchConsumption = fifo.consumption;
       }
 
       const verifiedTotal = roundMoney(verifiedProducts.reduce((sum, p) => sum + p.amount, 0));
@@ -1130,6 +1144,19 @@ app.post('/supplier/purchase', requireAuth, asyncHandler(async (req, res) => {
           }
         }
         await product.save({ session });
+
+        // Stage 22: every restock is its own distinct cost batch —
+        // consumed oldest-first by a future sale (lib/costing.js). Self-
+        // purchases get a batch too (supplierID: null), same as they
+        // already get a buyingPriceHistory entry above.
+        await createBatch({
+          productID: item.productID,
+          supplierID: isSelfPurchase ? null : supplier._id,
+          purchaseID,
+          quantity: item.quantity,
+          unitCost: item.unitCost,
+          session,
+        });
       }
 
       if (!isSelfPurchase) {
@@ -1335,12 +1362,29 @@ async function applyLineReduction(order, productID, newQty, reason, action, edit
   const unitNetPrice = originalQty > 0 ? line.amount / originalQty : 0;
   const unitDiscountAmount = originalQty > 0 ? (line.discountAmount || 0) / originalQty : 0;
 
+  // Stage 22: give back exactly the batch stock (and cost basis) this
+  // reduction undoes, before the line's own fields are mutated below —
+  // restoreConsumption needs the line's *original* quantity/consumption
+  // to know which batches to credit. This keeps the batches usable for a
+  // later sale and keeps the dashboard's profit figure from
+  // double-counting a line that's been edited down or refunded.
+  const { remainingConsumption, costRestored, knownQtyRestored } = await restoreConsumption(
+    line.batchConsumption,
+    originalQty,
+    restoreQty,
+    session
+  );
+
   if (newQty === 0) {
     order.products = order.products.filter((p) => p.productID !== productID);
   } else {
     line.quantity = newQty;
     line.amount = roundMoney(unitNetPrice * newQty);
     line.discountAmount = roundMoney(unitDiscountAmount * newQty);
+    line.batchConsumption = remainingConsumption;
+    line.costAmount = roundMoney(Math.max(0, (line.costAmount || 0) - costRestored));
+    line.costQuantity = Math.max(0, (line.costQuantity || 0) - knownQtyRestored);
+    line.costSource = deriveCostSource(line.costQuantity, newQty);
   }
 
   order.editHistory.push({ editedBy, editedAt: new Date(), productID, originalQty, newQty, reason, action });

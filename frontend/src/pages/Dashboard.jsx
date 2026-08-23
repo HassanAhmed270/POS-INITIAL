@@ -59,12 +59,22 @@ export default function Dashboard() {
 
           {error && <p className="text-red-600 text-sm">{error}</p>}
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 sm:gap-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-4 sm:gap-6">
             <StatCard
               label="Total Sales"
               value={dashboard ? formatMoney(dashboard.overallSales) : '--'}
               accent="border-brand"
               hint="Net of exchanges & refunds"
+            />
+            <StatCard
+              label="Total Profit"
+              value={dashboard ? formatMoney(dashboard.totalProfit) : '--'}
+              accent="border-brand-green"
+              hint={
+                dashboard?.unknownCostUnits > 0
+                  ? `${dashboard.unknownCostUnits} unit(s) sold have no recorded cost, excluded`
+                  : 'From batch/FIFO cost records'
+              }
             />
             <StatCard
               label="Total Orders"
